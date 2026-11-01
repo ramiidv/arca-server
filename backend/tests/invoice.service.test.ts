@@ -292,6 +292,19 @@ describe('invoice.service: resultado incierto → recuperar', () => {
     expect(db.invoices.size).toBe(0);
   });
 
+  it('no emitido y el reenvío falla por token (600) → sigue pendiente, no se borra', async () => {
+    arcaMock.facturar.mockRejectedValue(incierto(42));
+    arcaMock.recuperarComprobante.mockRejectedValueOnce(new Error('ECONNRESET'));
+    const { invoice } = await invoiceService.createInvoice(facturaB);
+
+    arcaMock.recuperarComprobante.mockResolvedValue({ estado: 'no_emitido' });
+    arcaMock.facturar.mockRejectedValue(new ArcaWSFEError([{ code: 600, msg: 'ValidacionDeToken: No valido token' }]));
+
+    await invoiceService.recuperarFactura(invoice.id);
+    expect(db.invoices.size).toBe(1);
+    expect(db.invoices.get(invoice.id)?.resultado).toBe('P');
+  });
+
   it('una factura pendiente bloquea nuevas emisiones del mismo tipo y punto de venta', async () => {
     arcaMock.facturar.mockRejectedValue(incierto(42));
     arcaMock.recuperarComprobante.mockRejectedValue(new Error('ECONNRESET'));

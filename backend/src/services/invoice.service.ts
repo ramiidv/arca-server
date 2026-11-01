@@ -259,7 +259,9 @@ async function resolverIncierto(emision: EmisionGuardada): Promise<{ desenlace: 
   try {
     return { desenlace: await enviar(emision.operacion, emision.opts), reenviado: true };
   } catch (e) {
-    if (e instanceof ArcaWSFEError) {
+    // Los errores de token/firma (600-602) no evalúan el comprobante: el envío
+    // original puede seguir en proceso en ARCA, así que no hay certeza de nada.
+    if (e instanceof ArcaWSFEError && !e.errors.some((err) => err.code >= 600 && err.code <= 699)) {
       return {
         desenlace: { tipo: 'rechazada', motivo: e.message, observaciones: e.errors },
         reenviado: true,
