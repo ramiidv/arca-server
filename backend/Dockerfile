@@ -3,11 +3,10 @@ FROM node:22-alpine AS builder
 
 WORKDIR /app
 
-COPY package.json package-lock.json* ./
-RUN npm ci
-
+# El schema tiene que estar antes de `npm ci`: el postinstall corre `prisma generate`.
+COPY package.json package-lock.json* prisma.config.ts ./
 COPY prisma ./prisma/
-RUN npx prisma generate
+RUN npm ci
 
 COPY tsconfig.json ./
 COPY src ./src/
@@ -21,12 +20,13 @@ WORKDIR /app
 RUN addgroup -S appgroup && adduser -S appuser -G appgroup \
   && mkdir -p /app/tickets && chown appuser:appgroup /app/tickets
 
-COPY package.json package-lock.json* ./
+COPY package.json package-lock.json* prisma.config.ts ./
+COPY prisma ./prisma/
+# El CLI de prisma queda en dependencies porque el CMD corre `prisma migrate deploy`; su
+# postinstall descarga los engines (el cliente que usa la app ya está compilado en dist/).
 RUN npm ci --omit=dev && npm cache clean --force
 
-COPY --from=builder /app/node_modules/.prisma ./node_modules/.prisma
 COPY --from=builder /app/dist ./dist
-COPY prisma ./prisma/
 
 USER appuser
 
