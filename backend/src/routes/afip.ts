@@ -4,6 +4,7 @@ import path from 'path';
 import { createCertificate, renewCertificate, getCertExpiry, authenticate } from 'arca-cert';
 import { arca, padron, cdc, fecred, mtxca, sire, agro, reloadArca } from '../services/arca.service';
 import { ArcaEmpleados } from '@ramiidv/arca-empleados';
+import { condicionIvaDesdePadron } from '@ramiidv/arca-padron';
 import type { RegistroRelacionLaboral } from '@ramiidv/arca-empleados';
 import { formatDate, ensureArray } from '@ramiidv/arca-common';
 
@@ -128,7 +129,10 @@ router.get('/contribuyente/:cuit', async (req: Request, res: Response, next: Nex
 
     // CUIT inexistente o inactiva: ArcaPadronServiceError (404 / 422 en errorHandler)
     const persona = await padron.getPersona(cuit);
-    res.json({ success: true, data: persona });
+    // Condición de IVA inferida de los impuestos (null + motivo si no se puede determinar):
+    // sirve para completar condicionIva al facturar (RG 5616).
+    const condicionIva = condicionIvaDesdePadron(persona);
+    res.json({ success: true, data: { ...persona, condicionIvaSugerida: condicionIva } });
   } catch (error) {
     next(error);
   }
