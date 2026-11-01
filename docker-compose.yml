@@ -32,6 +32,7 @@ services:
       AFIP_KEY_PATH: ${AFIP_KEY_PATH:-./certs/key.key}
       AFIP_PUNTO_VENTA: ${AFIP_PUNTO_VENTA:-1}
       AFIP_PRODUCTION: ${AFIP_PRODUCTION:-false}
+      AFIP_TICKETS_DIR: ${AFIP_TICKETS_DIR:-/app/tickets}
       PORT: 3001
       CORS_ORIGIN: ${CORS_ORIGIN:-*}
     ports:
@@ -41,6 +42,8 @@ services:
         condition: service_healthy
     volumes:
       - ./certs:/app/certs:ro
+      # Tickets de Acceso de WSAA: persisten entre reinicios (certs/ se monta solo lectura)
+      - arca-tickets:/app/tickets
 
   frontend:
     build:
@@ -70,3 +73,4 @@ services:
 
 volumes:
   pgdata:
+  arca-tickets:

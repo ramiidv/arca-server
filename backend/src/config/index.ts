@@ -38,6 +38,8 @@ export const config = {
     keyPath: getEnv('AFIP_KEY_PATH', path.resolve(__dirname, '../../certs/key.key')),
     puntoVenta: getEnvInt('AFIP_PUNTO_VENTA', 1),
     production: getEnvBool('AFIP_PRODUCTION', false),
+    // Directorio donde se persisten los Tickets de Acceso de WSAA (compartido por todos los SDKs)
+    ticketsDir: path.resolve(getEnv('AFIP_TICKETS_DIR', path.resolve(__dirname, '../../certs/tickets'))),
   },
 };
 
