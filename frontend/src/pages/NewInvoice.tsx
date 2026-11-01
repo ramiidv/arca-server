@@ -12,6 +12,7 @@ import { createInvoice, getClients, getPuntosVenta } from '../api/client';
 import {
   CBTE_TIPOS,
   IVA_ALICUOTAS,
+  IVA_CONDITIONS,
   type Client,
 } from '../types';
 import { formatCurrency, todayAsInputDate, inputDateToYYYYMMDD } from '../utils/formatters';
@@ -30,6 +31,8 @@ interface InvoiceFormData {
   concepto: number;
   docTipo: number;
   docNro: string;
+  /** Condición de IVA del receptor (RG 5616): obligatoria si docTipo != 99 */
+  condicionIva?: number | '';
   clientId?: number;
   items: FormItem[];
   fchServDesde: string;
@@ -73,6 +76,7 @@ export default function NewInvoice() {
       concepto: 1,
       docTipo: 99,
       docNro: '0',
+      condicionIva: '',
       items: [{ description: '', quantity: 1, unitPrice: 0, ivaId: 5 }],
       fchServDesde: today,
       fchServHasta: today,
@@ -86,6 +90,9 @@ export default function NewInvoice() {
   const watchItems = watch('items');
   const watchCbteTipo = Number(watch('cbteTipo'));
   const watchConcepto = Number(watch('concepto'));
+  const watchDocTipo = Number(watch('docTipo'));
+  // Receptor identificado sin cliente cargado: hay que indicar la condición de IVA
+  const pideCondicionIva = watchDocTipo !== 99 && !selectedClient;
 
   const esA = isTipoA(watchCbteTipo);
   const esC = isTipoC(watchCbteTipo);
@@ -184,6 +191,10 @@ export default function NewInvoice() {
       toast.error('Factura A requiere CUIT del receptor');
       return;
     }
+    if (pideCondicionIva && !data.condicionIva) {
+      toast.error('Indicá la condición de IVA del receptor');
+      return;
+    }
 
     try {
       setSubmitting(true);
@@ -210,6 +221,8 @@ export default function NewInvoice() {
         docTipo: Number(data.docTipo),
         docNro: data.docNro,
         clientId: data.clientId || undefined,
+        // Con cliente, el backend usa su condición de IVA
+        condicionIva: pideCondicionIva && data.condicionIva ? Number(data.condicionIva) : undefined,
         items,
         observations: data.observations || undefined,
       };
@@ -223,6 +236,16 @@ export default function NewInvoice() {
 
       const result = await createInvoice(payload);
       const inv = result.invoice;
+
+      if (result.afipResponse.resultado !== 'A') {
+        // Resultado incierto o conflicto: la factura quedó guardada, no se debe reemitir.
+        toast(result.afipResponse.mensaje || 'ARCA no confirmó el resultado. La factura quedó pendiente.', {
+          icon: '⚠️',
+          duration: 10000,
+        });
+        navigate(`/facturas/${inv.id}`);
+        return;
+      }
 
       toast.success('Factura emitida exitosamente');
       setSuccess({
@@ -461,6 +484,32 @@ export default function NewInvoice() {
                 <p className="mt-1 text-xs text-red-600">Documento requerido</p>
               )}
             </div>
+            {pideCondicionIva && (
+              <div>
+                <label className="label">
+                  Condición frente al IVA <span className="text-red-500">*</span>
+                </label>
+                <select {...register('condicionIva')} className="select">
+                  <option value="">Seleccioná...</option>
+                  {Object.entries(IVA_CONDITIONS)
+                    .filter(([value]) => value !== '5')
+                    .map(([value, label]) => (
+                      <option key={value} value={value}>{label}</option>
+                    ))}
+                </select>
+                <p className="mt-1 text-[11px] text-gray-400">
+                  Obligatoria para receptores identificados (RG 5616)
+                </p>
+              </div>
+            )}
+            {selectedClient && watchDocTipo !== 99 && (
+              <div>
+                <p className="label">Condición frente al IVA</p>
+                <p className="text-sm text-gray-700">
+                  {IVA_CONDITIONS[selectedClient.ivaCondition] || `Código ${selectedClient.ivaCondition}`} (del cliente)
+                </p>
+              </div>
+            )}
           </div>
         </div>
       </div>

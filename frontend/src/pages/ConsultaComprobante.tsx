@@ -1,10 +1,17 @@
 import { useState, useEffect } from 'react';
-import { MagnifyingGlassIcon, DocumentTextIcon } from '@heroicons/react/24/outline';
+import { MagnifyingGlassIcon, DocumentTextIcon, ShieldCheckIcon } from '@heroicons/react/24/outline';
 import toast from 'react-hot-toast';
-import { consultarComprobante, getPuntosVenta } from '../api/client';
+import { consultarComprobante, constatarComprobante, getPuntosVenta } from '../api/client';
 import { getApiErrorMessage } from '../utils/errors';
-import { CBTE_TIPOS } from '../types';
-import { formatCurrency, formatDate } from '../utils/formatters';
+import {
+  CBTE_TIPOS,
+  DOC_TIPOS,
+  type CbteModo,
+  type ComprobanteAfip,
+  type ConstatarInput,
+  type ConstatarResult,
+} from '../types';
+import { formatCurrency, formatDate, inputDateToYYYYMMDD } from '../utils/formatters';
 
 export default function ConsultaComprobante() {
   const [puntosVenta, setPuntosVenta] = useState<{ Nro: number }[]>([]);
@@ -12,7 +19,7 @@ export default function ConsultaComprobante() {
   const [cbteTipo, setCbteTipo] = useState(11);
   const [cbteNro, setCbteNro] = useState('');
   const [loading, setLoading] = useState(false);
-  const [result, setResult] = useState<Record<string, unknown> | null>(null);
+  const [result, setResult] = useState<ComprobanteAfip | null>(null);
 
   useEffect(() => {
     getPuntosVenta()
@@ -44,7 +51,7 @@ export default function ConsultaComprobante() {
     }
   };
 
-  const r = result as Record<string, number | string> | null;
+  const r = result;
 
   return (
     <div className="mx-auto max-w-3xl space-y-6">
@@ -225,6 +232,17 @@ export default function ConsultaComprobante() {
             </div>
           )}
 
+          {r.Observaciones.length > 0 && (
+            <div className="rounded-lg border border-amber-200 bg-amber-50/50 p-4">
+              <p className="mb-1 text-xs font-semibold text-amber-700">Observaciones de ARCA</p>
+              <ul className="space-y-0.5 text-sm text-amber-900">
+                {r.Observaciones.map((o) => (
+                  <li key={o.Code}>[{o.Code}] {o.Msg}</li>
+                ))}
+              </ul>
+            </div>
+          )}
+
           <div className="grid grid-cols-2 gap-4 text-sm">
             <div>
               <p className="text-xs text-gray-500">Moneda</p>
@@ -235,6 +253,208 @@ export default function ConsultaComprobante() {
               <p className="font-medium">{formatDate(String(r.FchProceso))}</p>
             </div>
           </div>
+        </div>
+      )}
+
+      <ConstatarForm desde={r} />
+    </div>
+  );
+}
+
+/** YYYYMMDD → YYYY-MM-DD (para un input type="date"). */
+function toInputDate(fecha: string): string {
+  return /^\d{8}$/.test(fecha) ? `${fecha.slice(0, 4)}-${fecha.slice(4, 6)}-${fecha.slice(6, 8)}` : fecha;
+}
+
+interface ConstatarFormState {
+  CbteModo: CbteModo;
+  CuitEmisor: string;
+  PtoVta: string;
+  CbteTipo: string;
+  CbteNro: string;
+  CbteFch: string;
+  ImpTotal: string;
+  CodAutorizacion: string;
+  DocTipoReceptor: string;
+  DocNroReceptor: string;
+}
+
+const CONSTATAR_VACIO: ConstatarFormState = {
+  CbteModo: 'CAE',
+  CuitEmisor: '',
+  PtoVta: '',
+  CbteTipo: '11',
+  CbteNro: '',
+  CbteFch: '',
+  ImpTotal: '',
+  CodAutorizacion: '',
+  DocTipoReceptor: '',
+  DocNroReceptor: '',
+};
+
+/**
+ * Constatación de comprobantes (WSCDC): verifica que un comprobante propio o
+ * de terceros haya sido autorizado por ARCA. Exige la modalidad de
+ * autorización (CAE, CAI o CAEA) y el CUIT del emisor.
+ */
+function ConstatarForm({ desde }: { desde: ComprobanteAfip | null }) {
+  const [form, setForm] = useState<ConstatarFormState>(CONSTATAR_VACIO);
+  const [loading, setLoading] = useState(false);
+  const [resultado, setResultado] = useState<ConstatarResult | null>(null);
+
+  const set = (campo: keyof ConstatarFormState) =>
+    (e: React.ChangeEvent<HTMLInputElement | HTMLSelectElement>) =>
+      setForm((f) => ({ ...f, [campo]: e.target.value }));
+
+  const usarConsultado = () => {
+    if (!desde) return;
+    setForm((f) => ({
+      ...f,
+      CbteModo: desde.EmisionTipo === 'CAEA' ? 'CAEA' : 'CAE',
+      PtoVta: String(desde.PtoVta),
+      CbteTipo: String(desde.CbteTipo),
+      CbteNro: String(desde.CbteDesde),
+      CbteFch: toInputDate(desde.CbteFch),
+      ImpTotal: String(desde.ImpTotal),
+      CodAutorizacion: desde.CodAutorizacion,
+      DocTipoReceptor: desde.DocTipo === 99 ? '' : String(desde.DocTipo),
+      DocNroReceptor: desde.DocTipo === 99 ? '' : String(desde.DocNro),
+    }));
+  };
+
+  const handleSubmit = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!/^\d{2}-?\d{8}-?\d$/.test(form.CuitEmisor)) {
+      toast.error('Ingresá el CUIT del emisor (11 dígitos)');
+      return;
+    }
+    if (!/^\d{14}$/.test(form.CodAutorizacion)) {
+      toast.error('El código de autorización tiene 14 dígitos');
+      return;
+    }
+    if ((form.DocTipoReceptor === '') !== (form.DocNroReceptor === '')) {
+      toast.error('El tipo y el número de documento del receptor se informan juntos');
+      return;
+    }
+
+    const input: ConstatarInput = {
+      CbteModo: form.CbteModo,
+      CuitEmisor: form.CuitEmisor,
+      PtoVta: Number(form.PtoVta),
+      CbteTipo: Number(form.CbteTipo),
+      CbteNro: Number(form.CbteNro),
+      CbteFch: inputDateToYYYYMMDD(form.CbteFch),
+      ImpTotal: Number(form.ImpTotal),
+      CodAutorizacion: form.CodAutorizacion,
+      ...(form.DocTipoReceptor !== '' && {
+        DocTipoReceptor: Number(form.DocTipoReceptor),
+        DocNroReceptor: form.DocNroReceptor,
+      }),
+    };
+
+    try {
+      setLoading(true);
+      setResultado(null);
+      setResultado(await constatarComprobante(input));
+    } catch (err) {
+      toast.error(getApiErrorMessage(err, 'No se pudo constatar el comprobante'), { duration: 8000 });
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  return (
+    <div className="card space-y-4">
+      <div className="flex flex-wrap items-center justify-between gap-2">
+        <h3 className="text-base font-semibold text-gray-900">Constatar Comprobante (WSCDC)</h3>
+        {desde && (
+          <button type="button" onClick={usarConsultado} className="btn-secondary text-xs">
+            Usar datos del comprobante consultado
+          </button>
+        )}
+      </div>
+      <form onSubmit={handleSubmit} className="space-y-4">
+        <div className="grid grid-cols-1 gap-4 sm:grid-cols-3">
+          <div>
+            <label className="label">Modalidad</label>
+            <select value={form.CbteModo} onChange={set('CbteModo')} className="select">
+              <option value="CAE">CAE</option>
+              <option value="CAEA">CAEA</option>
+              <option value="CAI">CAI</option>
+            </select>
+          </div>
+          <div>
+            <label className="label">CUIT del Emisor <span className="text-red-500">*</span></label>
+            <input value={form.CuitEmisor} onChange={set('CuitEmisor')} className="input" placeholder="20123456786" required />
+          </div>
+          <div>
+            <label className="label">Código de Autorización</label>
+            <input value={form.CodAutorizacion} onChange={set('CodAutorizacion')} className="input font-mono" placeholder="14 dígitos" required />
+          </div>
+          <div>
+            <label className="label">Tipo de Comprobante</label>
+            <select value={form.CbteTipo} onChange={set('CbteTipo')} className="select">
+              {Object.entries(CBTE_TIPOS).map(([value, label]) => (
+                <option key={value} value={value}>{label}</option>
+              ))}
+            </select>
+          </div>
+          <div>
+            <label className="label">Punto de Venta</label>
+            <input type="number" min={1} value={form.PtoVta} onChange={set('PtoVta')} className="input" required />
+          </div>
+          <div>
+            <label className="label">Número</label>
+            <input type="number" min={1} value={form.CbteNro} onChange={set('CbteNro')} className="input" required />
+          </div>
+          <div>
+            <label className="label">Fecha</label>
+            <input type="date" value={form.CbteFch} onChange={set('CbteFch')} className="input" required />
+          </div>
+          <div>
+            <label className="label">Importe Total</label>
+            <input type="number" min={0} step="0.01" value={form.ImpTotal} onChange={set('ImpTotal')} className="input" required />
+          </div>
+          <div>
+            <label className="label">Doc. Receptor (opcional)</label>
+            <div className="flex gap-2">
+              <select value={form.DocTipoReceptor} onChange={set('DocTipoReceptor')} className="select w-28">
+                <option value="">-</option>
+                {Object.entries(DOC_TIPOS).filter(([v]) => v !== '99').map(([value, label]) => (
+                  <option key={value} value={value}>{label}</option>
+                ))}
+              </select>
+              <input value={form.DocNroReceptor} onChange={set('DocNroReceptor')} className="input flex-1" placeholder="Número" />
+            </div>
+          </div>
+        </div>
+        <button type="submit" disabled={loading} className="btn-primary">
+          {loading ? (
+            <div className="h-4 w-4 animate-spin rounded-full border-2 border-white border-t-transparent" />
+          ) : (
+            <ShieldCheckIcon className="h-4 w-4" />
+          )}
+          Constatar
+        </button>
+      </form>
+
+      {resultado && (
+        <div className={`rounded-lg border p-4 ${resultado.Resultado === 'A' ? 'border-emerald-200 bg-emerald-50/50' : 'border-red-200 bg-red-50/50'}`}>
+          <div className="flex items-center justify-between">
+            {resultado.Resultado === 'A' ? (
+              <span className="badge-green">Comprobante autorizado por ARCA</span>
+            ) : (
+              <span className="badge-red">Rechazado</span>
+            )}
+            <span className="text-xs text-gray-500">Procesado: {resultado.FchProceso}</span>
+          </div>
+          {resultado.Observaciones.length > 0 && (
+            <ul className="mt-3 space-y-0.5 text-sm text-gray-700">
+              {resultado.Observaciones.map((o) => (
+                <li key={o.Code}>[{o.Code}] {o.Msg}</li>
+              ))}
+            </ul>
+          )}
         </div>
       )}
     </div>

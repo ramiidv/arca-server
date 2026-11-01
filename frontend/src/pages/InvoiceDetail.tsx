@@ -17,6 +17,7 @@ import {
   formatDocType,
 } from '../utils/formatters';
 import InvoiceStatusBadge from '../components/InvoiceStatusBadge';
+import RecuperarFacturaButton from '../components/RecuperarFacturaButton';
 
 export default function InvoiceDetail() {
   const { id } = useParams<{ id: string }>();
@@ -84,6 +85,51 @@ export default function InvoiceDetail() {
           </button>
         </div>
       </div>
+
+      {/* Resultado incierto o conflicto en ARCA */}
+      {(invoice.resultado === 'P' || invoice.resultado === 'C') && (
+        <div
+          className={`no-print rounded-lg border p-4 ${
+            invoice.resultado === 'C' ? 'border-red-200 bg-red-50' : 'border-amber-200 bg-amber-50'
+          }`}
+        >
+          <div className="flex flex-wrap items-start justify-between gap-3">
+            <div className="space-y-1 text-sm">
+              {invoice.resultado === 'P' ? (
+                <>
+                  <p className="font-semibold text-amber-900">ARCA no confirmó si autorizó esta factura</p>
+                  <p className="text-amber-800">
+                    El envío no tuvo una respuesta segura (timeout, error de red o error interno de ARCA).
+                    No la emitas de nuevo: reintentá la recuperación. Si ARCA no la tiene, se reenvía con el
+                    mismo número ({formatFullInvoiceNumber(invoice.puntoVenta, invoice.cbteNro)}).
+                  </p>
+                </>
+              ) : (
+                <>
+                  <p className="font-semibold text-red-900">Conflicto: el número existe en ARCA con otros datos</p>
+                  <p className="text-red-800">
+                    Otra emisión usó el número {formatFullInvoiceNumber(invoice.puntoVenta, invoice.cbteNro)}.
+                    Requiere revisión manual.
+                  </p>
+                </>
+              )}
+              {invoice.emision?.ultimoMensaje && (
+                <p className="text-xs text-gray-600">Último intento: {invoice.emision.ultimoMensaje}</p>
+              )}
+              {invoice.emision && (
+                <p className="text-xs text-gray-500">
+                  Envíos: {invoice.emision.envios} · Actualizado: {new Date(invoice.emision.actualizado).toLocaleString('es-AR')}
+                </p>
+              )}
+            </div>
+            <RecuperarFacturaButton
+              invoiceId={invoice.id}
+              onResultado={(result) => setInvoice(result.invoice)}
+              onEliminada={() => navigate('/facturas')}
+            />
+          </div>
+        </div>
+      )}
 
       {/* Invoice Header */}
       <div className="card">

@@ -16,6 +16,7 @@ import {
   formatFullInvoiceNumber,
 } from '../utils/formatters';
 import InvoiceStatusBadge from '../components/InvoiceStatusBadge';
+import RecuperarFacturaButton from '../components/RecuperarFacturaButton';
 
 export default function InvoiceList() {
   const [searchParams, setSearchParams] = useSearchParams();
@@ -28,6 +29,9 @@ export default function InvoiceList() {
   const [filterTipo, setFilterTipo] = useState<string>('');
   const [filterDesde, setFilterDesde] = useState('');
   const [filterHasta, setFilterHasta] = useState('');
+  const [filterResultado, setFilterResultado] = useState(searchParams.get('resultado') ?? '');
+  // Se incrementa para recargar la lista después de una recuperación
+  const [recarga, setRecarga] = useState(0);
   const [showFilters, setShowFilters] = useState(false);
 
   useEffect(() => {
@@ -38,6 +42,7 @@ export default function InvoiceList() {
         if (filterTipo) params.cbteTipo = Number(filterTipo);
         if (filterDesde) params.desde = filterDesde.replace(/-/g, '');
         if (filterHasta) params.hasta = filterHasta.replace(/-/g, '');
+        if (filterResultado) params.resultado = filterResultado;
 
         const data = await getInvoices(params as Parameters<typeof getInvoices>[0]);
         setInvoices(data.invoices || []);
@@ -50,7 +55,9 @@ export default function InvoiceList() {
       }
     }
     loadInvoices();
-  }, [page, filterTipo, filterDesde, filterHasta]);
+  }, [page, filterTipo, filterDesde, filterHasta, filterResultado, recarga]);
+
+  const pendientes = invoices.filter((inv) => inv.resultado === 'P' || inv.resultado === 'C').length;
 
   const goToPage = (p: number) => {
     setSearchParams({ page: String(p) });
@@ -84,7 +91,23 @@ export default function InvoiceList() {
       {/* Filters */}
       {showFilters && (
         <div className="card">
-          <div className="grid grid-cols-1 gap-4 sm:grid-cols-3">
+          <div className="grid grid-cols-1 gap-4 sm:grid-cols-4">
+            <div>
+              <label className="label">Estado</label>
+              <select
+                value={filterResultado}
+                onChange={(e) => {
+                  setFilterResultado(e.target.value);
+                  setSearchParams({ page: '1' });
+                }}
+                className="select"
+              >
+                <option value="">Todos</option>
+                <option value="A">Aprobadas</option>
+                <option value="P">Pendientes (resultado incierto)</option>
+                <option value="C">En conflicto</option>
+              </select>
+            </div>
             <div>
               <label className="label">Tipo</label>
               <select
@@ -133,12 +156,21 @@ export default function InvoiceList() {
               setFilterTipo('');
               setFilterDesde('');
               setFilterHasta('');
+              setFilterResultado('');
               setSearchParams({ page: '1' });
             }}
             className="mt-3 text-xs text-indigo-600 hover:underline"
           >
             Limpiar filtros
           </button>
+        </div>
+      )}
+
+      {/* Facturas con resultado incierto */}
+      {pendientes > 0 && (
+        <div className="rounded-lg border border-amber-200 bg-amber-50 px-4 py-3 text-sm text-amber-800">
+          Hay {pendientes} {pendientes === 1 ? 'factura' : 'facturas'} sin resultado confirmado por ARCA en esta página.
+          No las vuelvas a emitir: usá <strong>Recuperar</strong> para consultar si quedaron autorizadas.
         </div>
       )}
 
@@ -200,7 +232,17 @@ export default function InvoiceList() {
                       {inv.cae || '-'}
                     </td>
                     <td className="table-cell">
-                      <InvoiceStatusBadge resultado={inv.resultado} />
+                      <div className="flex flex-wrap items-center gap-2">
+                        <InvoiceStatusBadge resultado={inv.resultado} />
+                        {(inv.resultado === 'P' || inv.resultado === 'C') && (
+                          <RecuperarFacturaButton
+                            invoiceId={inv.id}
+                            compact
+                            onResultado={() => setRecarga((n) => n + 1)}
+                            onEliminada={() => setRecarga((n) => n + 1)}
+                          />
+                        )}
+                      </div>
                     </td>
                   </tr>
                 ))}

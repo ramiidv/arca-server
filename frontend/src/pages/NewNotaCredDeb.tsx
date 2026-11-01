@@ -9,7 +9,7 @@ import {
   MagnifyingGlassIcon,
 } from '@heroicons/react/24/outline';
 import { createNotaCredito, createNotaDebito, getInvoice, getInvoices } from '../api/client';
-import { CBTE_TIPOS, IVA_ALICUOTAS, type Invoice } from '../types';
+import { CBTE_TIPOS, IVA_ALICUOTAS, IVA_CONDITIONS, type Invoice } from '../types';
 import {
   formatCurrency,
   formatCbteTipo,
@@ -35,6 +35,8 @@ interface FormItem {
 interface NotaFormData {
   items: FormItem[];
   observations: string;
+  /** Condición de IVA del receptor (RG 5616), si la factura original no tiene cliente */
+  condicionIva: number | '';
 }
 
 export default function NewNotaCredDeb() {
@@ -61,6 +63,7 @@ export default function NewNotaCredDeb() {
     defaultValues: {
       items: [{ description: '', quantity: 1, unitPrice: 0, ivaId: 5 }],
       observations: '',
+      condicionIva: '',
     },
   });
 
@@ -68,6 +71,9 @@ export default function NewNotaCredDeb() {
   const watchItems = watch('items');
 
   const isTipoC = selectedInvoice ? [11, 12, 13].includes(selectedInvoice.cbteTipo) : false;
+  // Receptor identificado sin cliente: el backend no puede tomar la condición de IVA del cliente
+  // (si la factura original se emitió con esta versión, la toma de sus datos de emisión).
+  const pideCondicionIva = !!selectedInvoice && selectedInvoice.docTipo !== 99 && !selectedInvoice.client;
 
   // Load preselected invoice
   useEffect(() => {
@@ -94,7 +100,7 @@ export default function NewNotaCredDeb() {
       const data = await getInvoices({ limit: 20 });
       // Filter only valid facturas (not NC/ND)
       const valid = (data.invoices || []).filter(
-        (inv) => FACTURAS_VALIDAS.has(inv.cbteTipo) && inv.cae
+        (inv) => FACTURAS_VALIDAS.has(inv.cbteTipo) && inv.cae && inv.resultado === 'A'
       );
       setInvoices(valid);
     } catch {
@@ -145,11 +151,22 @@ export default function NewNotaCredDeb() {
         puntoVenta: selectedInvoice.puntoVenta,
         items,
         observations: data.observations || undefined,
+        condicionIva: pideCondicionIva && data.condicionIva ? Number(data.condicionIva) : undefined,
       };
 
       const createFn = tipo === 'nc' ? createNotaCredito : createNotaDebito;
       const result = await createFn(payload);
       const inv = result.invoice;
+
+      if (result.afipResponse.resultado !== 'A') {
+        // Resultado incierto o conflicto: quedó guardada, no se debe reemitir.
+        toast(result.afipResponse.mensaje || 'ARCA no confirmó el resultado. El comprobante quedó pendiente.', {
+          icon: '⚠️',
+          duration: 10000,
+        });
+        navigate(`/facturas/${inv.id}`);
+        return;
+      }
 
       toast.success(`${tipo === 'nc' ? 'Nota de Crédito' : 'Nota de Débito'} emitida`);
       setSuccess({
@@ -435,6 +452,24 @@ export default function NewNotaCredDeb() {
               })}
             </div>
           </div>
+
+          {/* Condición de IVA del receptor */}
+          {pideCondicionIva && (
+            <div className="card">
+              <label className="label">Condición frente al IVA del receptor</label>
+              <select {...register('condicionIva')} className="select">
+                <option value="">La de la factura original</option>
+                {Object.entries(IVA_CONDITIONS)
+                  .filter(([value]) => value !== '5')
+                  .map(([value, label]) => (
+                    <option key={value} value={value}>{label}</option>
+                  ))}
+              </select>
+              <p className="mt-1 text-[11px] text-gray-400">
+                Obligatoria para receptores identificados (RG 5616). Completala si la factura original es anterior a la migración.
+              </p>
+            </div>
+          )}
 
           {/* Observations */}
           <div className="card">

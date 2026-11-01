@@ -110,6 +110,21 @@ export default function Dashboard() {
         )}
       </div>
 
+      {/* Facturas con resultado incierto o en conflicto */}
+      {(stats?.pendingInvoices ?? 0) > 0 && (
+        <div className="flex flex-wrap items-center justify-between gap-3 rounded-lg border border-amber-200 bg-amber-50 px-4 py-3 text-sm text-amber-800">
+          <span>
+            {stats!.pendingInvoices === 1
+              ? 'Hay 1 factura sin resultado confirmado por ARCA.'
+              : `Hay ${stats!.pendingInvoices} facturas sin resultado confirmado por ARCA.`}{' '}
+            No las vuelvas a emitir: recuperalas.
+          </span>
+          <Link to="/facturas?resultado=P" className="font-medium text-amber-900 underline">
+            Ver pendientes
+          </Link>
+        </div>
+      )}
+
       {/* Stats Cards */}
       <div className="grid grid-cols-2 gap-3 sm:gap-4 lg:grid-cols-4">
         <div className="stat-card">
