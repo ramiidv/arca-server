@@ -1,20 +1,55 @@
 import { Request, Response, NextFunction } from 'express';
-import { ArcaAuthError, ArcaWSFEError, ArcaSoapError, ArcaError } from '@ramiidv/arca-facturacion';
-import { ArcaServiceError } from '@ramiidv/arca-common';
+import {
+  ArcaError,
+  ArcaAuthError,
+  ArcaTicketVigenteError,
+  ArcaSoapError,
+  ArcaServiceError,
+  ArcaValidationError,
+  ArcaWSFEError,
+  ArcaResultadoIncierto,
+  ArcaResultadoInciertoExpo,
+} from '@ramiidv/arca-facturacion';
+import { ArcaPadronServiceError, ArcaPadronError } from '@ramiidv/arca-padron';
+import { ArcaAgroResponseError } from '@ramiidv/arca-agro';
+import { ArcaSerializationError } from '@ramiidv/arca-empleados';
 import { ArcaCertError, parseSoapFault } from 'arca-cert';
 
 export class AppError extends Error {
   public readonly statusCode: number;
   public readonly isOperational: boolean;
+  public readonly details?: unknown;
 
-  constructor(statusCode: number, message: string, isOperational = true) {
+  constructor(statusCode: number, message: string, isOperational = true, details?: unknown) {
     super(message);
     this.statusCode = statusCode;
     this.isOperational = isOperational;
+    this.details = details;
     Object.setPrototypeOf(this, AppError.prototype);
   }
 }
 
+/** Código HTTP para un error de negocio de Padrón según su `reason`. */
+const PADRON_REASON_STATUS: Record<string, number> = {
+  inexistente: 404,
+  inactiva: 422,
+  id_invalido: 400,
+  // El certificado no está autorizado para el servicio: problema de configuración del server.
+  no_autorizado: 502,
+  otro: 422,
+};
+
+/**
+ * Mapea los errores de los SDKs de ARCA a respuestas HTTP.
+ *
+ * El orden de los `instanceof` importa: varias clases heredan unas de otras
+ * (`ArcaTicketVigenteError` → `ArcaAuthError`, `ArcaPadronServiceError` y
+ * `ArcaWSFEError` → `ArcaServiceError`, y todas → `ArcaError`), así que
+ * siempre se chequea primero la clase más específica.
+ *
+ * Nunca se devuelven el certificado, la clave ni el token/sign: los mensajes
+ * de los SDKs no los incluyen y no se serializa `cause` ni el request.
+ */
 export function errorHandler(
   err: Error,
   _req: Request,
@@ -27,6 +62,7 @@ export function errorHandler(
     res.status(err.statusCode).json({
       success: false,
       error: err.message,
+      ...(err.details !== undefined && { details: err.details }),
     });
     return;
   }
@@ -50,53 +86,169 @@ export function errorHandler(
     }
   }
 
-  // ARCA SDK errors
+  // ---------------------------------------------------------------------------
+  // Errores de los SDKs de ARCA (de la clase más específica a la más general)
+  // ---------------------------------------------------------------------------
+
+  // Datos inválidos: el SDK no llegó a enviar nada a ARCA.
+  if (err instanceof ArcaValidationError) {
+    res.status(400).json({
+      success: false,
+      error: err.message,
+      code: err.code,
+      field: err.field,
+      details: err.details,
+    });
+    return;
+  }
+
+  // Emisión de exportación sin resultado seguro: reenviar con el mismo Id.
+  if (err instanceof ArcaResultadoInciertoExpo) {
+    res.status(502).json({
+      success: false,
+      uncertain: true,
+      code: err.code,
+      error: 'No se sabe si ARCA autorizó el comprobante de exportación. Reenviá la misma solicitud con el mismo Id.',
+      details: err.message,
+      recuperacion: {
+        operacion: err.operacion,
+        id: err.id,
+        cbteTipo: err.cbteTipo,
+        ptoVta: err.ptoVta,
+        cbteNro: err.cbteNro,
+        intento: err.intento,
+      },
+    });
+    return;
+  }
+
+  // Emisión WSFEv1 sin resultado seguro: hay que recuperar el comprobante.
+  if (err instanceof ArcaResultadoIncierto) {
+    res.status(502).json({
+      success: false,
+      uncertain: true,
+      code: err.code,
+      error: 'No se sabe si ARCA autorizó el comprobante. No lo reenvíes sin recuperarlo primero.',
+      details: err.message,
+      recuperacion: {
+        operacion: err.operacion,
+        intento: err.intento,
+        intentos: err.intentos,
+      },
+    });
+    return;
+  }
+
+  // Antes que ArcaAuthError (es una subclase).
+  if (err instanceof ArcaTicketVigenteError) {
+    res.status(503).json({
+      success: false,
+      code: err.code,
+      error: `WSAA ya emitió un Ticket de Acceso vigente para "${err.service}" que no está guardado. Hay que esperar a que venza (hasta 12 horas).`,
+      service: err.service,
+    });
+    return;
+  }
+
   if (err instanceof ArcaAuthError) {
     res.status(503).json({
       success: false,
+      code: err.code,
       error: 'AFIP authentication failed',
       details: err.message,
     });
     return;
   }
 
-  if (err instanceof ArcaWSFEError) {
-    res.status(400).json({
+  // Antes que ArcaServiceError (es una subclase).
+  if (err instanceof ArcaPadronServiceError) {
+    res.status(PADRON_REASON_STATUS[err.reason] ?? 422).json({
       success: false,
+      code: err.code,
+      reason: err.reason,
+      error: err.errors[0]?.msg ?? err.message,
+      errors: err.errors,
+    });
+    return;
+  }
+
+  // Antes que ArcaServiceError (es una subclase).
+  if (err instanceof ArcaWSFEError) {
+    res.status(422).json({
+      success: false,
+      code: err.code,
       error: 'AFIP rejected the request',
       details: err.errors,
+      errors: err.errors,
+    });
+    return;
+  }
+
+  // Rechazos de negocio del resto de los servicios (SIRE, agro, FECRED, CDC, MTXCA).
+  if (err instanceof ArcaServiceError) {
+    res.status(422).json({
+      success: false,
+      code: err.code,
+      error: err.message,
+      errors: err.errors,
     });
     return;
   }
 
   if (err instanceof ArcaSoapError) {
-    const status = err.statusCode || 502;
-    // Try to parse SOAP fault from the error message for a cleaner response
-    const fault = parseSoapFault(err.message);
-    if (fault?.soapFault) {
-      res.status(status).json({
-        success: false,
-        error: fault.message,
-        soapFault: {
-          faultcode: fault.soapFault.faultcode,
-          faultstring: fault.soapFault.faultstring,
-        },
-      });
-      return;
+    // Un 4xx/5xx de ARCA es un problema del upstream: se informa como 502
+    // (504 si no hubo respuesta y el resultado es incierto, ej: timeout).
+    // El código original va en upstreamStatus.
+    const status = err.statusCode === undefined && err.uncertain ? 504 : 502;
+    let fault: { faultcode?: string; faultstring?: string } | undefined;
+    if (err.faultString) {
+      fault = { faultcode: err.faultCode, faultstring: err.faultString };
+    } else {
+      // Fallback: algunos mensajes traen el Fault en el texto.
+      const parsed = parseSoapFault(err.message);
+      if (parsed?.soapFault) {
+        fault = { faultcode: parsed.soapFault.faultcode, faultstring: parsed.soapFault.faultstring };
+      }
     }
     res.status(status).json({
       success: false,
-      error: 'AFIP service unavailable',
+      code: err.code,
+      error: fault ? `ARCA respondió con un error SOAP: ${fault.faultstring}` : 'AFIP service unavailable',
       details: err.message,
+      uncertain: err.uncertain,
+      ...(err.statusCode !== undefined && { upstreamStatus: err.statusCode }),
+      ...(fault && { soapFault: fault }),
     });
     return;
   }
 
-  // arca-common / arca-padron / arca-cdc errors
-  if (err instanceof ArcaServiceError) {
+  // Respuesta de WSCPE/WSLPG sin un dato imprescindible (ej: sin COE).
+  if (err instanceof ArcaAgroResponseError) {
+    res.status(502).json({
+      success: false,
+      code: err.code,
+      error: err.message,
+      uncertain: err.uncertain,
+    });
+    return;
+  }
+
+  // Respuesta de Padrón sin un dato obligatorio.
+  if (err instanceof ArcaPadronError) {
+    res.status(502).json({ success: false, code: err.code, error: err.message });
+    return;
+  }
+
+  // Un valor no entra en el archivo de ancho fijo de empleados.
+  if (err instanceof ArcaSerializationError) {
     res.status(400).json({
       success: false,
+      code: err.code,
       error: err.message,
+      field: err.field,
+      indice: err.indice,
+      desde: err.desde,
+      hasta: err.hasta,
     });
     return;
   }
@@ -104,6 +256,7 @@ export function errorHandler(
   if (err instanceof ArcaError) {
     res.status(400).json({
       success: false,
+      code: err.code,
       error: err.message,
     });
     return;
@@ -144,13 +297,13 @@ export function errorHandler(
     return;
   }
 
-  // Zod validation errors
+  // Zod validation errors (zod 4: `issues`)
   if (err.constructor?.name === 'ZodError') {
     const zodErr = err as any;
     res.status(400).json({
       success: false,
       error: 'Validation error',
-      details: zodErr.errors,
+      details: zodErr.issues ?? zodErr.errors,
     });
     return;
   }
