@@ -44,8 +44,11 @@ function estadoServicio<T>(r: PromiseSettledResult<T>) {
 // GET /status - WSFE server status
 router.get('/status', async (_req: Request, res: Response, next: NextFunction) => {
   try {
-    const status = await arca.serverStatus();
-    res.json({ success: true, data: status });
+    const { wsfe } = await arca.status();
+    if (!wsfe.ok) throw wsfe.error;
+    // El frontend espera los nombres de WSFE (AppServer/DbServer/AuthServer).
+    const { appserver, dbserver, authserver } = wsfe.status;
+    res.json({ success: true, data: { AppServer: appserver, DbServer: dbserver, AuthServer: authserver } });
   } catch (error) {
     next(error);
   }
@@ -609,7 +612,7 @@ router.post('/sire-anular', async (req: Request, res: Response, next: NextFuncti
 // GET /agro-status - WSCPE y WSLPG health check: { cpe, lpg } con { ok, status | error }
 router.get('/agro-status', async (_req: Request, res: Response, next: NextFunction) => {
   try {
-    const status = await agro.serverStatus();
+    const status = await agro.status();
     const data = Object.fromEntries(
       Object.entries(status).map(([servicio, s]) => [
         servicio,

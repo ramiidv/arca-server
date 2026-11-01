@@ -1,5 +1,5 @@
 import fs from 'fs';
-import { Arca, FileTicketStorage } from '@ramiidv/arca-facturacion';
+import { ArcaFacturacion, FileTicketStorage } from '@ramiidv/arca-facturacion';
 import type { ArcaEvent, ArcaBaseConfig } from '@ramiidv/arca-common';
 import { ArcaPadron } from '@ramiidv/arca-padron';
 import { ArcaCdc } from '@ramiidv/arca-cdc';
@@ -71,7 +71,7 @@ function createAll(production?: boolean) {
   };
 
   return {
-    arca: new Arca(base),
+    arca: new ArcaFacturacion(base),
     padron: new ArcaPadron(base),
     cdc: new ArcaCdc(base),
     fecred: new ArcaFecred(base),
