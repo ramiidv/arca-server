@@ -1,6 +1,7 @@
 node_modules/
 dist/
 src/generated/
+backend/src/generated/
 *.tsbuildinfo
 *.d.ts.map
 vite.config.d.ts
