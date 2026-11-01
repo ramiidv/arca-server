@@ -68,6 +68,7 @@ model Invoice {
   impTrib      Decimal       @db.Decimal(15, 2)
   cae          String?
   caeFchVto    String?
+  /// "A" aprobada, "P" pendiente (resultado incierto, se puede recuperar), "C" conflicto (revisión manual)
   resultado    String?
   monId        String        @default("PES")
   monCotiz     Decimal       @default(1) @db.Decimal(15, 6)
@@ -79,12 +80,16 @@ model Invoice {
   items        InvoiceItem[]
   qrUrl        String?
   observations String?
+  /// Datos de la emisión en ARCA (operación, opciones con cbteNro y fecha fijos, intento y estado)
+  /// para recuperar un comprobante con resultado incierto y reenviarlo con el mismo número.
+  emision      Json?
   createdAt    DateTime      @default(now())
   updatedAt    DateTime      @updatedAt
 
   @@unique([cbteTipo, puntoVenta, cbteNro])
   @@index([cbteFch])
   @@index([clientId])
+  @@index([resultado])
 }
 
 model InvoiceItem {

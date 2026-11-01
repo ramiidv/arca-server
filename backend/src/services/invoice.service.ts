@@ -1,6 +1,26 @@
 import { Prisma } from '../generated/prisma/client';
-import { Arca, IVA_RATES, Concepto } from '@ramiidv/arca-facturacion';
-import type { FacturarOpts, LineItem, FacturaResult } from '@ramiidv/arca-facturacion';
+import {
+  IVA_RATES,
+  Concepto,
+  DocTipo,
+  NOTA_CREDITO_MAP,
+  NOTA_DEBITO_MAP,
+  ArcaResultadoIncierto,
+  ArcaSoapError,
+  ArcaWSFEError,
+  requiereRecuperacion,
+} from '@ramiidv/arca-facturacion';
+import type {
+  FacturarOpts,
+  NotaCreditoOpts,
+  NotaDebitoOpts,
+  ComprobanteRef,
+  LineItem,
+  FacturaResult,
+  IntentoComprobante,
+  MensajeArca,
+} from '@ramiidv/arca-facturacion';
+import { formatDate } from '@ramiidv/arca-common';
 import { prisma } from '../lib/prisma';
 import { arca } from './arca.service';
 import { config } from '../config';
@@ -18,6 +38,7 @@ interface CreateInvoiceInput {
   clientId?: number;
   docTipo: number;
   docNro: string;
+  condicionIva?: number;
   concepto?: number;
   puntoVenta: number;
   items: InvoiceItemInput[];
@@ -30,6 +51,7 @@ interface CreateInvoiceInput {
 interface CreateNotaCreditoInput {
   originalInvoiceId: number;
   puntoVenta: number;
+  condicionIva?: number;
   concepto?: number;
   items: InvoiceItemInput[];
   fchServDesde?: string;
@@ -38,25 +60,55 @@ interface CreateNotaCreditoInput {
   observations?: string;
 }
 
-interface CreateNotaDebitoInput {
-  originalInvoiceId: number;
-  puntoVenta: number;
-  concepto?: number;
-  items: InvoiceItemInput[];
-  fchServDesde?: string;
-  fchServHasta?: string;
-  fchVtoPago?: string;
-  observations?: string;
-}
+type CreateNotaDebitoInput = CreateNotaCreditoInput;
 
 interface InvoiceFilters {
   page?: number;
   limit?: number;
   cbteTipo?: number;
   clientId?: number;
+  resultado?: string;
   from?: string;
   to?: string;
 }
+
+/** Valores de `Invoice.resultado`. */
+export const RESULTADO = {
+  /** Autorizada por ARCA (con CAE). */
+  APROBADA: 'A',
+  /** Resultado incierto o envío interrumpido: hay que recuperarla (POST /invoices/:id/recuperar). */
+  PENDIENTE: 'P',
+  /** El número existe en ARCA con otros datos: revisión manual. */
+  CONFLICTO: 'C',
+} as const;
+
+type Operacion = 'facturar' | 'notaCredito' | 'notaDebito';
+type OptsEmision = FacturarOpts | NotaCreditoOpts | NotaDebitoOpts;
+
+/**
+ * Lo que se guarda en `Invoice.emision` (JSON) ANTES de enviar el comprobante:
+ * alcanza para saber después si ARCA lo autorizó (`intento`) y para reenviarlo
+ * con el mismo número y la misma fecha (`opts`).
+ */
+export interface EmisionGuardada {
+  operacion: Operacion;
+  /** Opciones enviadas, con `cbteNro` y `fecha` fijos. */
+  opts: OptsEmision;
+  intento: IntentoComprobante;
+  estado: 'enviando' | 'incierto' | 'conflicto' | 'autorizado';
+  /** Cantidad de envíos a ARCA (el primero más los reenvíos tras `no_emitido`). */
+  envios: number;
+  ultimoMensaje?: string;
+  encontrado?: Record<string, unknown>;
+  actualizado: string;
+}
+
+/** Desenlace de un envío o de una recuperación. */
+type Desenlace =
+  | { tipo: 'aprobada'; result: FacturaResult }
+  | { tipo: 'incierta'; motivo: string }
+  | { tipo: 'conflicto'; motivo: string; encontrado: Record<string, unknown> }
+  | { tipo: 'rechazada'; motivo: string; observaciones: MensajeArca[] };
 
 function roundTwo(n: number): number {
   return Math.round(n * 100) / 100;
@@ -83,330 +135,516 @@ function processItemsForDB(items: InvoiceItemInput[]) {
   });
 }
 
-class InvoiceService {
-  async createInvoice(data: CreateInvoiceInput) {
-    const processedItems = processItemsForDB(data.items);
+function mensajes(obs: MensajeArca[]): string {
+  return obs.length > 0 ? obs.map((o) => `${o.code}: ${o.msg}`).join('; ') : 'Unknown reason';
+}
 
-    const lineItems: LineItem[] = processedItems.map((item) => ({
-      neto: item.subtotal,
-      iva: item.ivaId,
-    }));
+function esServicio(concepto: number): boolean {
+  return concepto === Concepto.SERVICIOS || concepto === Concepto.PRODUCTOS_Y_SERVICIOS;
+}
 
-    const concepto = data.concepto ?? Concepto.SERVICIOS;
-    const esServicio = concepto === Concepto.SERVICIOS || concepto === Concepto.PRODUCTOS_Y_SERVICIOS;
-    const today = Arca.formatDate(new Date());
+function esperar(ms: number): Promise<void> {
+  return ms > 0 ? new Promise((resolve) => setTimeout(resolve, ms)) : Promise.resolve();
+}
 
-    const opts: FacturarOpts = {
-      ptoVta: data.puntoVenta,
-      cbteTipo: data.cbteTipo,
-      items: lineItems,
-      concepto,
-      docTipo: data.docTipo,
-      docNro: Number(data.docNro),
-      ...(esServicio && {
-        servicio: {
-          desde: data.fchServDesde || today,
-          hasta: data.fchServHasta || today,
-          vtoPago: data.fchVtoPago || today,
-        },
-      }),
-    };
+// Serializa las emisiones por (punto de venta, tipo de comprobante) dentro del
+// proceso: el número se reserva como último autorizado + 1 y dos emisiones en
+// paralelo tomarían el mismo.
+const locks = new Map<string, Promise<void>>();
 
-    const result = await arca.facturar(opts);
+async function conLock<T>(key: string, fn: () => Promise<T>): Promise<T> {
+  const previo = locks.get(key) ?? Promise.resolve();
+  let liberar!: () => void;
+  const actual = previo.then(() => new Promise<void>((resolve) => { liberar = resolve; }));
+  locks.set(key, actual);
+  await previo;
+  try {
+    return await fn();
+  } finally {
+    liberar();
+    if (locks.get(key) === actual) locks.delete(key);
+  }
+}
 
-    if (!result.aprobada) {
-      const obsMsg = result.observaciones.length > 0
-        ? result.observaciones.map((o) => `${o.code}: ${o.msg}`).join('; ')
-        : 'Unknown reason';
-      throw new AppError(400, `AFIP rejected invoice: ${obsMsg}`);
+/** URL del QR con el helper del SDK. Un QR que no se puede armar no invalida una factura autorizada. */
+function qrDe(result: FacturaResult): string | null {
+  try {
+    return arca.urlQR(result);
+  } catch (e) {
+    console.error('[Facturación] No se pudo generar el QR:', (e as Error).message);
+    return null;
+  }
+}
+
+/** Llama a la operación del SDK que corresponde. */
+function llamar(operacion: Operacion, opts: OptsEmision): Promise<FacturaResult> {
+  switch (operacion) {
+    case 'facturar':
+      return arca.facturar(opts as FacturarOpts);
+    case 'notaCredito':
+      return arca.notaCredito(opts as NotaCreditoOpts);
+    case 'notaDebito':
+      return arca.notaDebito(opts as NotaDebitoOpts);
+  }
+}
+
+/**
+ * Envía el comprobante una vez y clasifica la respuesta:
+ * - `aprobada`: ARCA otorgó el CAE.
+ * - `incierta`: `ArcaResultadoIncierto` (o un `ArcaSoapError` incierto), o un
+ *   rechazo 10016 por número que puede significar que un intento anterior se
+ *   autorizó (`requiereRecuperacion`).
+ * - `rechazada`: `aprobada: false` con observaciones (no se emitió).
+ * Cualquier otro error se propaga: `ArcaWSFEError` (ARCA rechazó, no se emitió),
+ * o errores antes de enviar (validación, WSAA, sin conexión).
+ */
+async function enviar(operacion: Operacion, opts: OptsEmision): Promise<Desenlace> {
+  let result: FacturaResult;
+  try {
+    result = await llamar(operacion, opts);
+  } catch (e) {
+    if (e instanceof ArcaResultadoIncierto || (e instanceof ArcaSoapError && e.uncertain)) {
+      return { tipo: 'incierta', motivo: e.message };
     }
+    throw e;
+  }
+  if (result.aprobada) return { tipo: 'aprobada', result };
+  if (requiereRecuperacion(result)) {
+    return { tipo: 'incierta', motivo: `ARCA respondió 10016 por número: ${mensajes(result.observaciones)}` };
+  }
+  return { tipo: 'rechazada', motivo: mensajes(result.observaciones), observaciones: result.observaciones };
+}
 
-    let qrUrl: string | undefined;
-    if (result.cae) {
-      const cbteFchFormatted = `${today.slice(0, 4)}-${today.slice(4, 6)}-${today.slice(6, 8)}`;
-      qrUrl = Arca.generateQRUrl({
-        fecha: cbteFchFormatted,
-        cuit: Number(config.afip.cuit),
-        ptoVta: result.ptoVta,
-        tipoCmp: result.cbteTipo,
-        nroCmp: result.cbteNro,
-        importe: result.importes.total,
-        moneda: 'PES',
-        ctz: 1,
-        tipoDocRec: data.docTipo,
-        nroDocRec: Number(data.docNro),
-        codAut: Number(result.cae),
-      });
-    }
+/**
+ * Resuelve un comprobante con resultado incierto según el flujo del README de
+ * arca-facturacion:
+ * - `autorizado`: ARCA lo autorizó → se usa ese CAE.
+ * - `no_emitido`: no existe → se reenvía UNA vez con las mismas opciones
+ *   (mismo `cbteNro` y misma fecha). Es seguro: si el intento original llegara
+ *   a autorizarse después, ARCA rechaza el duplicado (10016), nunca emite dos.
+ * - `conflicto`: el número existe con otros datos → revisión manual.
+ * Si la consulta o el reenvío no dan certeza, el comprobante sigue pendiente.
+ */
+async function resolverIncierto(emision: EmisionGuardada): Promise<{ desenlace: Desenlace; reenviado: boolean }> {
+  let recuperacion;
+  try {
+    recuperacion = await arca.recuperarComprobante(emision.intento);
+  } catch (e) {
+    return { desenlace: { tipo: 'incierta', motivo: `No se pudo consultar ARCA: ${(e as Error).message}` }, reenviado: false };
+  }
 
-    const invoice = await prisma.invoice.create({
-      data: {
-        cbteTipo: result.cbteTipo,
-        puntoVenta: result.ptoVta,
-        cbteNro: result.cbteNro,
-        cbteDesde: result.cbteNro,
-        cbteHasta: result.cbteNro,
-        cbteFch: today,
-        concepto,
-        docTipo: data.docTipo,
-        docNro: data.docNro,
-        impTotal: new Prisma.Decimal(result.importes.total),
-        impTotConc: new Prisma.Decimal(result.importes.noGravado),
-        impNeto: new Prisma.Decimal(result.importes.neto),
-        impOpEx: new Prisma.Decimal(result.importes.exento),
-        impIVA: new Prisma.Decimal(result.importes.iva),
-        impTrib: new Prisma.Decimal(result.importes.tributos),
-        cae: result.cae || '',
-        caeFchVto: result.caeVencimiento || '',
-        resultado: result.aprobada ? 'A' : 'R',
-        monId: 'PES',
-        monCotiz: new Prisma.Decimal(1),
-        fchServDesde: data.fchServDesde || (esServicio ? today : undefined),
-        fchServHasta: data.fchServHasta || (esServicio ? today : undefined),
-        fchVtoPago: data.fchVtoPago || (esServicio ? today : undefined),
-        qrUrl: qrUrl || null,
-        clientId: data.clientId || null,
-        observations: data.observations || null,
-        items: {
-          create: processedItems.map((item) => ({
-            description: item.description,
-            quantity: new Prisma.Decimal(item.quantity),
-            unitPrice: new Prisma.Decimal(item.unitPrice),
-            ivaId: item.ivaId,
-            ivaRate: new Prisma.Decimal(item.ivaRate),
-            subtotal: new Prisma.Decimal(item.subtotal),
-            ivaAmount: new Prisma.Decimal(item.ivaAmount),
-          })),
-        },
-      },
-      include: {
-        items: true,
-        client: true,
-      },
-    });
+  if (recuperacion.estado === 'autorizado') {
+    return { desenlace: { tipo: 'aprobada', result: recuperacion.resultado }, reenviado: false };
+  }
 
+  if (recuperacion.estado === 'conflicto') {
+    const r = recuperacion.encontrado.ResultGet;
     return {
-      invoice,
-      afipResponse: {
-        cae: result.cae,
-        caeFchVto: result.caeVencimiento,
-        resultado: result.aprobada ? 'A' : 'R',
-        observaciones: result.observaciones,
-        qrUrl,
+      desenlace: {
+        tipo: 'conflicto',
+        motivo: `El comprobante ${emision.intento.cbteTipo}-${emision.intento.ptoVta}-${emision.intento.cbteNro} existe en ARCA con otros datos`,
+        encontrado: {
+          CbteFch: r?.CbteFch,
+          ImpTotal: r?.ImpTotal,
+          DocTipo: r?.DocTipo,
+          DocNro: r?.DocNro,
+          CodAutorizacion: r?.CodAutorizacion,
+        },
       },
+      reenviado: false,
     };
   }
 
-  async createNotaCredito(data: CreateNotaCreditoInput) {
-    const originalInvoice = await prisma.invoice.findUnique({
-      where: { id: data.originalInvoiceId },
-      include: { items: true },
-    });
-
-    if (!originalInvoice) {
-      throw new AppError(404, `Original invoice with ID ${data.originalInvoiceId} not found`);
+  // no_emitido: reenviar con el mismo número.
+  try {
+    return { desenlace: await enviar(emision.operacion, emision.opts), reenviado: true };
+  } catch (e) {
+    if (e instanceof ArcaWSFEError) {
+      return {
+        desenlace: { tipo: 'rechazada', motivo: e.message, observaciones: e.errors },
+        reenviado: true,
+      };
     }
-
-    if (!originalInvoice.cae) {
-      throw new AppError(400, 'Original invoice has no CAE, cannot create credit note');
-    }
-
-    const processedItems = processItemsForDB(data.items);
-    const lineItems: LineItem[] = processedItems.map((item) => ({
-      neto: item.subtotal,
-      iva: item.ivaId,
-    }));
-
-    const concepto = data.concepto ?? originalInvoice.concepto;
-    const esServicio = concepto === Concepto.SERVICIOS || concepto === Concepto.PRODUCTOS_Y_SERVICIOS;
-    const today = Arca.formatDate(new Date());
-
-    const result = await arca.notaCredito({
-      ptoVta: data.puntoVenta,
-      comprobanteOriginal: {
-        tipo: originalInvoice.cbteTipo,
-        ptoVta: originalInvoice.puntoVenta,
-        nro: originalInvoice.cbteNro,
-      },
-      items: lineItems,
-      concepto,
-      docTipo: originalInvoice.docTipo,
-      docNro: Number(originalInvoice.docNro),
-      ...(esServicio && {
-        servicio: {
-          desde: data.fchServDesde || today,
-          hasta: data.fchServHasta || today,
-          vtoPago: data.fchVtoPago || today,
-        },
-      }),
-    });
-
-    return this.saveComprobante(result, processedItems, {
-      docTipo: originalInvoice.docTipo,
-      docNro: originalInvoice.docNro,
-      concepto,
-      esServicio,
-      today,
-      clientId: originalInvoice.clientId,
-      observations: data.observations,
-      fchServDesde: data.fchServDesde,
-      fchServHasta: data.fchServHasta,
-      fchVtoPago: data.fchVtoPago,
-    });
+    // No se pudo enviar (WSAA, red, etc.): sigue pendiente, se puede reintentar.
+    return { desenlace: { tipo: 'incierta', motivo: `No se pudo reenviar: ${(e as Error).message}` }, reenviado: false };
   }
+}
 
-  async createNotaDebito(data: CreateNotaDebitoInput) {
-    const originalInvoice = await prisma.invoice.findUnique({
-      where: { id: data.originalInvoiceId },
-      include: { items: true },
-    });
+const includeDetalle = { items: true, client: true } as const;
 
-    if (!originalInvoice) {
-      throw new AppError(404, `Original invoice with ID ${data.originalInvoiceId} not found`);
-    }
-
-    if (!originalInvoice.cae) {
-      throw new AppError(400, 'Original invoice has no CAE, cannot create debit note');
-    }
-
-    const processedItems = processItemsForDB(data.items);
-    const lineItems: LineItem[] = processedItems.map((item) => ({
-      neto: item.subtotal,
-      iva: item.ivaId,
-    }));
-
-    const concepto = data.concepto ?? originalInvoice.concepto;
-    const esServicio = concepto === Concepto.SERVICIOS || concepto === Concepto.PRODUCTOS_Y_SERVICIOS;
-    const today = Arca.formatDate(new Date());
-
-    const result = await arca.notaDebito({
-      ptoVta: data.puntoVenta,
-      comprobanteOriginal: {
-        tipo: originalInvoice.cbteTipo,
-        ptoVta: originalInvoice.puntoVenta,
-        nro: originalInvoice.cbteNro,
-      },
-      items: lineItems,
-      concepto,
-      docTipo: originalInvoice.docTipo,
-      docNro: Number(originalInvoice.docNro),
-      ...(esServicio && {
-        servicio: {
-          desde: data.fchServDesde || today,
-          hasta: data.fchServHasta || today,
-          vtoPago: data.fchVtoPago || today,
-        },
-      }),
-    });
-
-    return this.saveComprobante(result, processedItems, {
-      docTipo: originalInvoice.docTipo,
-      docNro: originalInvoice.docNro,
-      concepto,
-      esServicio,
-      today,
-      clientId: originalInvoice.clientId,
-      observations: data.observations,
-      fchServDesde: data.fchServDesde,
-      fchServHasta: data.fchServHasta,
-      fchVtoPago: data.fchVtoPago,
-    });
-  }
-
-  private async saveComprobante(
-    result: FacturaResult,
-    processedItems: ReturnType<typeof processItemsForDB>,
+class InvoiceService {
+  /**
+   * Emite un comprobante de forma segura:
+   * 1. Reserva el número (último autorizado + 1) y fija la fecha con el reloj de ARCA.
+   * 2. Arma el comprobante sin red (`armarComprobante`, valida igual que `facturar`).
+   * 3. Guarda la factura como pendiente con el intento ANTES de enviar: si el
+   *    proceso se cae a mitad del envío, queda en la DB para recuperarla.
+   * 4. Envía y resuelve: aprobada, rechazada (se borra: no se emitió) o
+   *    incierta (se intenta `recuperarComprobante`; si no hay certeza, queda pendiente).
+   */
+  private async emitir(params: {
+    operacion: Operacion;
+    cbteTipo: number;
+    opts: OptsEmision;
+    /** Opciones equivalentes para `armarComprobante` (con el tipo y los asociados resueltos). */
+    optsArmado: FacturarOpts;
+    processedItems: ReturnType<typeof processItemsForDB>;
     meta: {
       docTipo: number;
       docNro: string;
       concepto: number;
-      esServicio: boolean;
-      today: string;
       clientId: number | null;
       observations?: string;
-      fchServDesde?: string;
-      fchServHasta?: string;
-      fchVtoPago?: string;
-    },
-  ) {
-    if (!result.aprobada) {
-      const obsMsg = result.observaciones.length > 0
-        ? result.observaciones.map((o) => `${o.code}: ${o.msg}`).join('; ')
-        : 'Unknown reason';
-      throw new AppError(400, `AFIP rejected comprobante: ${obsMsg}`);
-    }
+      servicio: boolean;
+    };
+  }) {
+    const { operacion, cbteTipo, processedItems, meta } = params;
+    const ptoVta = params.opts.ptoVta;
 
-    let qrUrl: string | undefined;
-    if (result.cae) {
-      const cbteFchFormatted = `${meta.today.slice(0, 4)}-${meta.today.slice(4, 6)}-${meta.today.slice(6, 8)}`;
-      qrUrl = Arca.generateQRUrl({
-        fecha: cbteFchFormatted,
-        cuit: Number(config.afip.cuit),
-        ptoVta: result.ptoVta,
-        tipoCmp: result.cbteTipo,
-        nroCmp: result.cbteNro,
-        importe: result.importes.total,
-        moneda: 'PES',
-        ctz: 1,
-        tipoDocRec: meta.docTipo,
-        nroDocRec: Number(meta.docNro),
-        codAut: Number(result.cae),
+    return conLock(`${ptoVta}-${cbteTipo}`, async () => {
+      const pendiente = await prisma.invoice.findFirst({
+        where: { cbteTipo, puntoVenta: ptoVta, resultado: RESULTADO.PENDIENTE },
+        select: { id: true, cbteNro: true },
       });
+      if (pendiente) {
+        throw new AppError(
+          409,
+          `Hay un comprobante pendiente de recuperación (factura #${pendiente.id}, número ${pendiente.cbteNro}) ` +
+            'para este tipo y punto de venta. Recuperalo antes de emitir otro.',
+        );
+      }
+
+      const cbteNro = (await arca.ultimoComprobante(ptoVta, cbteTipo)) + 1;
+      // Fecha fija: el intento guardado y el envío (o un reenvío) tienen que coincidir.
+      const fecha = formatDate(arca.wsaa.now());
+      const opts = { ...params.opts, cbteNro, fecha } as OptsEmision;
+      const { intento, importes } = arca.armarComprobante({ ...params.optsArmado, cbteNro, fecha });
+
+      const emision: EmisionGuardada = {
+        operacion,
+        opts,
+        intento,
+        estado: 'enviando',
+        envios: 1,
+        actualizado: new Date().toISOString(),
+      };
+
+      const fechaServicio = (v: unknown) => (meta.servicio ? formatDate(v as string) : undefined);
+      const servicio = (opts as FacturarOpts).servicio;
+
+      const creada = await prisma.invoice.create({
+        data: {
+          cbteTipo,
+          puntoVenta: ptoVta,
+          cbteNro,
+          cbteDesde: cbteNro,
+          cbteHasta: cbteNro,
+          cbteFch: intento.fecha,
+          concepto: meta.concepto,
+          docTipo: meta.docTipo,
+          docNro: meta.docNro,
+          impTotal: new Prisma.Decimal(importes.total),
+          impTotConc: new Prisma.Decimal(importes.noGravado),
+          impNeto: new Prisma.Decimal(importes.neto),
+          impOpEx: new Prisma.Decimal(importes.exento),
+          impIVA: new Prisma.Decimal(importes.iva),
+          impTrib: new Prisma.Decimal(importes.tributos),
+          cae: null,
+          caeFchVto: null,
+          resultado: RESULTADO.PENDIENTE,
+          monId: 'PES',
+          monCotiz: new Prisma.Decimal(1),
+          fchServDesde: servicio ? fechaServicio(servicio.desde) : undefined,
+          fchServHasta: servicio ? fechaServicio(servicio.hasta) : undefined,
+          fchVtoPago: servicio ? fechaServicio(servicio.vtoPago) : undefined,
+          qrUrl: null,
+          clientId: meta.clientId,
+          observations: meta.observations || null,
+          emision: emision as unknown as Prisma.InputJsonValue,
+          items: {
+            create: processedItems.map((item) => ({
+              description: item.description,
+              quantity: new Prisma.Decimal(item.quantity),
+              unitPrice: new Prisma.Decimal(item.unitPrice),
+              ivaId: item.ivaId,
+              ivaRate: new Prisma.Decimal(item.ivaRate),
+              subtotal: new Prisma.Decimal(item.subtotal),
+              ivaAmount: new Prisma.Decimal(item.ivaAmount),
+            })),
+          },
+        },
+      });
+
+      let desenlace: Desenlace;
+      try {
+        desenlace = await enviar(operacion, opts);
+      } catch (e) {
+        // No se emitió (ARCA rechazó con ArcaWSFEError, o falló antes de enviar).
+        await prisma.invoice.delete({ where: { id: creada.id } });
+        throw e;
+      }
+
+      if (desenlace.tipo === 'rechazada') {
+        await prisma.invoice.delete({ where: { id: creada.id } });
+        throw new AppError(400, `AFIP rejected comprobante: ${desenlace.motivo}`, true, desenlace.observaciones);
+      }
+
+      if (desenlace.tipo === 'incierta') {
+        console.warn(`[Facturación] Resultado incierto para la factura #${creada.id}: ${desenlace.motivo}`);
+        await this.guardarEmision(creada.id, { ...emision, estado: 'incierto', ultimoMensaje: desenlace.motivo });
+        await esperar(config.afip.recoveryDelayMs);
+        const resuelto = await resolverIncierto({ ...emision, estado: 'incierto' });
+        const envios = emision.envios + (resuelto.reenviado ? 1 : 0);
+        return this.aplicarDesenlace(creada.id, { ...emision, envios }, resuelto.desenlace);
+      }
+
+      return this.aplicarDesenlace(creada.id, emision, desenlace);
+    });
+  }
+
+  private async guardarEmision(id: number, emision: EmisionGuardada) {
+    await prisma.invoice.update({
+      where: { id },
+      data: { emision: { ...emision, actualizado: new Date().toISOString() } as unknown as Prisma.InputJsonValue },
+    });
+  }
+
+  /** Persiste el desenlace y arma la respuesta. */
+  private async aplicarDesenlace(id: number, emision: EmisionGuardada, desenlace: Desenlace) {
+    const actualizado = new Date().toISOString();
+
+    if (desenlace.tipo === 'aprobada') {
+      const result = desenlace.result;
+      const qrUrl = qrDe(result);
+      const invoice = await prisma.invoice.update({
+        where: { id },
+        data: {
+          cae: result.cae ?? null,
+          caeFchVto: result.caeVencimiento ?? null,
+          resultado: RESULTADO.APROBADA,
+          qrUrl,
+          emision: { ...emision, estado: 'autorizado', ultimoMensaje: undefined, actualizado } as unknown as Prisma.InputJsonValue,
+        },
+        include: includeDetalle,
+      });
+      return {
+        invoice,
+        afipResponse: {
+          cae: result.cae,
+          caeFchVto: result.caeVencimiento,
+          resultado: RESULTADO.APROBADA,
+          observaciones: result.observaciones,
+          eventos: result.eventos,
+          qrUrl: qrUrl ?? undefined,
+        },
+      };
     }
 
-    const invoice = await prisma.invoice.create({
-      data: {
-        cbteTipo: result.cbteTipo,
-        puntoVenta: result.ptoVta,
-        cbteNro: result.cbteNro,
-        cbteDesde: result.cbteNro,
-        cbteHasta: result.cbteNro,
-        cbteFch: meta.today,
-        concepto: meta.concepto,
-        docTipo: meta.docTipo,
-        docNro: meta.docNro,
-        impTotal: new Prisma.Decimal(result.importes.total),
-        impTotConc: new Prisma.Decimal(result.importes.noGravado),
-        impNeto: new Prisma.Decimal(result.importes.neto),
-        impOpEx: new Prisma.Decimal(result.importes.exento),
-        impIVA: new Prisma.Decimal(result.importes.iva),
-        impTrib: new Prisma.Decimal(result.importes.tributos),
-        cae: result.cae || '',
-        caeFchVto: result.caeVencimiento || '',
-        resultado: 'A',
-        monId: 'PES',
-        monCotiz: new Prisma.Decimal(1),
-        fchServDesde: meta.fchServDesde || (meta.esServicio ? meta.today : undefined),
-        fchServHasta: meta.fchServHasta || (meta.esServicio ? meta.today : undefined),
-        fchVtoPago: meta.fchVtoPago || (meta.esServicio ? meta.today : undefined),
-        qrUrl: qrUrl || null,
-        clientId: meta.clientId,
-        observations: meta.observations || null,
-        items: {
-          create: processedItems.map((item) => ({
-            description: item.description,
-            quantity: new Prisma.Decimal(item.quantity),
-            unitPrice: new Prisma.Decimal(item.unitPrice),
-            ivaId: item.ivaId,
-            ivaRate: new Prisma.Decimal(item.ivaRate),
-            subtotal: new Prisma.Decimal(item.subtotal),
-            ivaAmount: new Prisma.Decimal(item.ivaAmount),
-          })),
-        },
-      },
-      include: { items: true, client: true },
-    });
+    if (desenlace.tipo === 'rechazada') {
+      // Después de recuperar y reenviar, ARCA lo rechazó: con certeza no se emitió.
+      // Se borra para liberar el número (cbteTipo, puntoVenta, cbteNro).
+      await prisma.invoice.delete({ where: { id } });
+      throw new AppError(
+        422,
+        `ARCA rechazó el comprobante al reenviarlo: no se emitió y se eliminó el registro pendiente. ${desenlace.motivo}`,
+        true,
+        desenlace.observaciones,
+      );
+    }
 
+    const conflicto = desenlace.tipo === 'conflicto';
+    const invoice = await prisma.invoice.update({
+      where: { id },
+      data: {
+        resultado: conflicto ? RESULTADO.CONFLICTO : RESULTADO.PENDIENTE,
+        emision: {
+          ...emision,
+          estado: conflicto ? 'conflicto' : 'incierto',
+          ultimoMensaje: desenlace.motivo,
+          ...(conflicto && { encontrado: desenlace.encontrado }),
+          actualizado,
+        } as unknown as Prisma.InputJsonValue,
+      },
+      include: includeDetalle,
+    });
     return {
       invoice,
       afipResponse: {
-        cae: result.cae,
-        caeFchVto: result.caeVencimiento,
-        resultado: 'A',
-        observaciones: result.observaciones,
-        qrUrl,
+        resultado: invoice.resultado,
+        pendiente: !conflicto,
+        conflicto,
+        mensaje: conflicto
+          ? `${desenlace.motivo}. Requiere revisión manual.`
+          : 'ARCA no confirmó el resultado. La factura quedó pendiente: reintentá la recuperación.',
+        intento: emision.intento,
       },
     };
+  }
+
+  async createInvoice(data: CreateInvoiceInput) {
+    const processedItems = processItemsForDB(data.items);
+    const items: LineItem[] = processedItems.map((item) => ({ neto: item.subtotal, iva: item.ivaId }));
+
+    const concepto = data.concepto ?? Concepto.SERVICIOS;
+    const servicio = esServicio(concepto);
+    const condicionIva = await this.condicionIvaReceptor(data.docTipo, data.condicionIva, data.clientId);
+    const today = formatDate(arca.wsaa.now());
+
+    const opts: FacturarOpts = {
+      ptoVta: data.puntoVenta,
+      cbteTipo: data.cbteTipo,
+      items,
+      concepto,
+      docTipo: data.docTipo,
+      docNro: Number(data.docNro),
+      ...(condicionIva !== undefined && { condicionIva }),
+      ...(servicio && {
+        servicio: {
+          desde: data.fchServDesde || today,
+          hasta: data.fchServHasta || today,
+          vtoPago: data.fchVtoPago || today,
+        },
+      }),
+    };
+
+    return this.emitir({
+      operacion: 'facturar',
+      cbteTipo: data.cbteTipo,
+      opts,
+      optsArmado: opts,
+      processedItems,
+      meta: {
+        docTipo: data.docTipo,
+        docNro: data.docNro,
+        concepto,
+        clientId: data.clientId ?? null,
+        observations: data.observations,
+        servicio,
+      },
+    });
+  }
+
+  async createNotaCredito(data: CreateNotaCreditoInput) {
+    return this.createNotaAsociada('notaCredito', data);
+  }
+
+  async createNotaDebito(data: CreateNotaDebitoInput) {
+    return this.createNotaAsociada('notaDebito', data);
+  }
+
+  private async createNotaAsociada(operacion: 'notaCredito' | 'notaDebito', data: CreateNotaCreditoInput) {
+    const esNC = operacion === 'notaCredito';
+    const originalInvoice = await prisma.invoice.findUnique({
+      where: { id: data.originalInvoiceId },
+      include: { items: true, client: true },
+    });
+
+    if (!originalInvoice) {
+      throw new AppError(404, `Original invoice with ID ${data.originalInvoiceId} not found`);
+    }
+
+    if (!originalInvoice.cae || originalInvoice.resultado !== RESULTADO.APROBADA) {
+      throw new AppError(400, `Original invoice has no CAE, cannot create ${esNC ? 'credit' : 'debit'} note`);
+    }
+
+    const cbteTipo = (esNC ? NOTA_CREDITO_MAP : NOTA_DEBITO_MAP)[originalInvoice.cbteTipo];
+    if (cbteTipo === undefined) {
+      throw new AppError(400, `No se puede emitir una nota de ${esNC ? 'crédito' : 'débito'} para el tipo ${originalInvoice.cbteTipo}`);
+    }
+
+    const processedItems = processItemsForDB(data.items);
+    const items: LineItem[] = processedItems.map((item) => ({ neto: item.subtotal, iva: item.ivaId }));
+
+    const concepto = data.concepto ?? originalInvoice.concepto;
+    const servicio = esServicio(concepto);
+    const today = formatDate(arca.wsaa.now());
+    const emisionOriginal = originalInvoice.emision as unknown as EmisionGuardada | null;
+    const condicionIva = await this.condicionIvaReceptor(
+      originalInvoice.docTipo,
+      data.condicionIva ?? originalInvoice.client?.ivaCondition ?? (emisionOriginal?.opts as FacturarOpts | undefined)?.condicionIva,
+    );
+
+    const comprobanteOriginal: ComprobanteRef = {
+      tipo: originalInvoice.cbteTipo,
+      ptoVta: originalInvoice.puntoVenta,
+      nro: originalInvoice.cbteNro,
+      fecha: originalInvoice.cbteFch,
+    };
+
+    const comun = {
+      ptoVta: data.puntoVenta,
+      items,
+      concepto,
+      docTipo: originalInvoice.docTipo,
+      docNro: Number(originalInvoice.docNro),
+      ...(condicionIva !== undefined && { condicionIva }),
+      ...(servicio && {
+        servicio: {
+          desde: data.fchServDesde || today,
+          hasta: data.fchServHasta || today,
+          vtoPago: data.fchVtoPago || today,
+        },
+      }),
+    };
+
+    return this.emitir({
+      operacion,
+      cbteTipo,
+      opts: { ...comun, comprobanteOriginal } as NotaCreditoOpts,
+      // Lo mismo que hacen notaCredito/notaDebito del SDK: tipo inferido y el original como asociado.
+      optsArmado: { ...comun, cbteTipo, cbtesAsoc: [comprobanteOriginal] },
+      processedItems,
+      meta: {
+        docTipo: originalInvoice.docTipo,
+        docNro: originalInvoice.docNro,
+        concepto,
+        clientId: originalInvoice.clientId,
+        observations: data.observations,
+        servicio,
+      },
+    });
+  }
+
+  /**
+   * Condición de IVA del receptor (RG 5616): obligatoria si está identificado
+   * (docTipo distinto de 99). Si no viene, se toma la del cliente. Si falta,
+   * el SDK lanza ArcaValidationError (400).
+   */
+  private async condicionIvaReceptor(docTipo: number, condicionIva?: number, clientId?: number) {
+    if (condicionIva !== undefined) return condicionIva;
+    if (docTipo === DocTipo.CONSUMIDOR_FINAL) return undefined;
+    if (clientId) {
+      const client = await prisma.client.findUnique({ where: { id: clientId }, select: { ivaCondition: true } });
+      return client?.ivaCondition ?? undefined;
+    }
+    return undefined;
+  }
+
+  /**
+   * Reintenta la recuperación de una factura pendiente (resultado incierto o
+   * envío interrumpido) o en conflicto. Ver `resolverIncierto`.
+   */
+  async recuperarFactura(id: number) {
+    const invoice = await prisma.invoice.findUnique({ where: { id }, include: includeDetalle });
+    if (!invoice) {
+      throw new AppError(404, `Invoice with ID ${id} not found`);
+    }
+    if (invoice.resultado === RESULTADO.APROBADA) {
+      return { invoice, afipResponse: { resultado: RESULTADO.APROBADA, cae: invoice.cae, mensaje: 'La factura ya está aprobada.' } };
+    }
+    if (invoice.resultado !== RESULTADO.PENDIENTE && invoice.resultado !== RESULTADO.CONFLICTO) {
+      throw new AppError(409, 'La factura no está pendiente de recuperación');
+    }
+    const emision = invoice.emision as unknown as EmisionGuardada | null;
+    if (!emision?.intento || !emision.opts || !emision.operacion) {
+      throw new AppError(409, 'La factura no tiene los datos de emisión necesarios para recuperarla');
+    }
+
+    return conLock(`${invoice.puntoVenta}-${invoice.cbteTipo}`, async () => {
+      const { desenlace, reenviado } = await resolverIncierto(emision);
+      const envios = (emision.envios ?? 1) + (reenviado ? 1 : 0);
+      return this.aplicarDesenlace(id, { ...emision, envios }, desenlace);
+    });
   }
 
   async getInvoices(filters: InvoiceFilters) {
@@ -422,6 +660,10 @@ class InvoiceService {
 
     if (filters.clientId) {
       where.clientId = filters.clientId;
+    }
+
+    if (filters.resultado) {
+      where.resultado = filters.resultado;
     }
 
     if (filters.from || filters.to) {
@@ -478,14 +720,18 @@ class InvoiceService {
   }
 
   async getInvoiceStats() {
-    const [totalCount, totalsByType, totalAmount, recentInvoices] = await Promise.all([
-      prisma.invoice.count(),
+    // Los totales cuentan solo comprobantes autorizados (no los pendientes ni en conflicto).
+    const aprobadas: Prisma.InvoiceWhereInput = { resultado: RESULTADO.APROBADA };
+    const [totalCount, totalsByType, totalAmount, recentInvoices, pendingCount] = await Promise.all([
+      prisma.invoice.count({ where: aprobadas }),
       prisma.invoice.groupBy({
         by: ['cbteTipo'],
+        where: aprobadas,
         _count: { id: true },
         _sum: { impTotal: true },
       }),
       prisma.invoice.aggregate({
+        where: aprobadas,
         _sum: { impTotal: true },
       }),
       prisma.invoice.findMany({
@@ -495,6 +741,7 @@ class InvoiceService {
           client: { select: { name: true } },
         },
       }),
+      prisma.invoice.count({ where: { resultado: { in: [RESULTADO.PENDIENTE, RESULTADO.CONFLICTO] } } }),
     ]);
 
     const CBTE_TIPO_NAMES: Record<number, string> = {
@@ -511,6 +758,7 @@ class InvoiceService {
 
     return {
       totalCount,
+      pendingCount,
       totalAmount: totalAmount._sum.impTotal || 0,
       byType: totalsByType.map((t) => ({
         cbteTipo: t.cbteTipo,

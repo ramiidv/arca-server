@@ -1,6 +1,6 @@
 import { Router, Request, Response, NextFunction } from 'express';
 import { z } from 'zod';
-import { invoiceService } from '../services/invoice.service';
+import { invoiceService, RESULTADO } from '../services/invoice.service';
 
 const router = Router();
 
@@ -14,6 +14,8 @@ const createInvoiceSchema = z.object({
   clientId: z.number().int().positive().optional(),
   docTipo: z.number().int().min(0),
   docNro: z.string().min(1, 'docNro is required'),
+  // Condición de IVA del receptor (RG 5616). Obligatoria si docTipo != 99; si no viene se toma la del cliente.
+  condicionIva: z.number().int().positive().optional(),
   concepto: z.number().int().min(1).max(3).default(2),
   puntoVenta: z.number().int().positive(),
   items: z
@@ -34,13 +36,22 @@ const createInvoiceSchema = z.object({
   observations: z.string().optional(),
 });
 
+/**
+ * 201 si ARCA autorizó el comprobante; 202 si quedó pendiente (resultado
+ * incierto) o en conflicto: se guardó y se puede reintentar la recuperación
+ * con POST /:id/recuperar.
+ */
+function statusEmision(resultado: string | null | undefined): number {
+  return resultado === RESULTADO.APROBADA ? 201 : 202;
+}
+
 // POST / - Create invoice
 router.post('/', async (req: Request, res: Response, next: NextFunction) => {
   try {
     const data = createInvoiceSchema.parse(req.body);
     const result = await invoiceService.createInvoice(data);
 
-    res.status(201).json({
+    res.status(statusEmision(result.afipResponse.resultado)).json({
       success: true,
       data: result,
     });
@@ -52,6 +63,7 @@ router.post('/', async (req: Request, res: Response, next: NextFunction) => {
 const createNotaCreditoSchema = z.object({
   originalInvoiceId: z.number().int().positive(),
   puntoVenta: z.number().int().positive(),
+  condicionIva: z.number().int().positive().optional(),
   concepto: z.number().int().min(1).max(3).optional(),
   items: z
     .array(
@@ -76,7 +88,7 @@ router.post('/nota-credito', async (req: Request, res: Response, next: NextFunct
   try {
     const data = createNotaCreditoSchema.parse(req.body);
     const result = await invoiceService.createNotaCredito(data);
-    res.status(201).json({ success: true, data: result });
+    res.status(statusEmision(result.afipResponse.resultado)).json({ success: true, data: result });
   } catch (error) {
     next(error);
   }
@@ -87,7 +99,7 @@ router.post('/nota-debito', async (req: Request, res: Response, next: NextFuncti
   try {
     const data = createNotaCreditoSchema.parse(req.body);
     const result = await invoiceService.createNotaDebito(data);
-    res.status(201).json({ success: true, data: result });
+    res.status(statusEmision(result.afipResponse.resultado)).json({ success: true, data: result });
   } catch (error) {
     next(error);
   }
@@ -111,6 +123,9 @@ router.get('/', async (req: Request, res: Response, next: NextFunction) => {
       limit: req.query.limit ? parseInt(req.query.limit as string, 10) : undefined,
       cbteTipo: req.query.cbteTipo ? parseInt(req.query.cbteTipo as string, 10) : undefined,
       clientId: req.query.clientId ? parseInt(req.query.clientId as string, 10) : undefined,
+      resultado: typeof req.query.resultado === 'string' && /^[A-Z]$/.test(req.query.resultado)
+        ? req.query.resultado
+        : undefined,
       from: req.query.from as string | undefined,
       to: req.query.to as string | undefined,
     };
@@ -133,6 +148,22 @@ router.get('/:id', async (req: Request, res: Response, next: NextFunction) => {
 
     const invoice = await invoiceService.getInvoiceById(id);
     res.json({ success: true, data: invoice });
+  } catch (error) {
+    next(error);
+  }
+});
+
+// POST /:id/recuperar - Retry recovery of a pending (uncertain) or conflicting invoice
+router.post('/:id/recuperar', async (req: Request, res: Response, next: NextFunction) => {
+  try {
+    const id = parseInt(req.params.id as string, 10);
+    if (isNaN(id)) {
+      res.status(400).json({ success: false, error: 'Invalid invoice ID' });
+      return;
+    }
+
+    const result = await invoiceService.recuperarFactura(id);
+    res.json({ success: true, data: result });
   } catch (error) {
     next(error);
   }
