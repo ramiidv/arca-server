@@ -12,6 +12,8 @@ import {
 import toast from 'react-hot-toast';
 import { MagnifyingGlassIcon } from '@heroicons/react/24/outline';
 import { getApiErrorMessage } from '../utils/errors';
+import { formatDate } from '../utils/formatters';
+import type { Cotizacion } from '../types';
 
 interface ParamItem {
   Id: number | string;
@@ -52,7 +54,8 @@ export default function AfipParams() {
     monedas: false,
     tributos: false,
   });
-  const [cotizacion, setCotizacion] = useState<{ MonCotiz: number; FchCotiz: string } | null>(null);
+  // ResultGet de FEParamGetCotizacion: { MonId, MonCotiz, FchCotiz }
+  const [cotizacion, setCotizacion] = useState<Cotizacion | null>(null);
   const [cotizLoading, setCotizLoading] = useState(false);
 
   const fetchTab = async (tab: TabKey) => {
@@ -192,13 +195,13 @@ export default function AfipParams() {
         <div className="card border-indigo-200 bg-indigo-50/50">
           <div className="flex items-center justify-between">
             <div>
-              <p className="text-xs text-indigo-600">Cotización Oficial AFIP</p>
+              <p className="text-xs text-indigo-600">Cotización Oficial AFIP ({cotizacion.MonId})</p>
               <p className="mt-0.5 text-2xl font-bold text-indigo-900">
                 ${cotizacion.MonCotiz}
               </p>
             </div>
             <p className="text-xs text-indigo-400">
-              Fecha: {cotizacion.FchCotiz}
+              Fecha: {formatDate(cotizacion.FchCotiz)}
             </p>
           </div>
         </div>

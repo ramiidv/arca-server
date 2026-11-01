@@ -85,32 +85,29 @@ export default function NewClient() {
       setCuitFound(false);
       const persona = await consultarCuit(cuit);
 
-      // Handle both old SDK format and new arca-padron format
-      const nombre = persona.nombre || persona.razonSocial ||
+      // Padrón A4 (arca-padron): nombre/apellido o razón social
+      const nombre = persona.razonSocial ||
         [persona.apellido, persona.nombre].filter(Boolean).join(' ') || '';
       if (nombre) setValue('name', nombre);
 
-      // Address from domicilios array (new) or domicilioFiscal (old)
-      const domicilio = persona.domicilios?.[0] || persona.domicilioFiscal;
+      // Domicilio: el fiscal si está, si no el primero
+      const domicilio = persona.domicilio?.find((d) => d.tipoDomicilio === 'FISCAL') ?? persona.domicilio?.[0];
       if (domicilio) {
         const parts = [
-          domicilio.direccion || domicilio.calle,
+          domicilio.direccion,
           domicilio.localidad,
-          domicilio.codPostal || domicilio.codigoPostal,
-          domicilio.provincia || domicilio.descripcionProvincia,
+          domicilio.codPostal,
+          domicilio.descripcionProvincia,
         ].filter(Boolean);
         if (parts.length > 0) setValue('address', parts.join(', '));
       }
 
-      // Infer IVA condition from impuestos
-      const impuestos = persona.impuestos || [];
-      const impIds = impuestos.map((i: { id?: number; idImpuesto?: number }) => i.id || i.idImpuesto);
-      if (impIds.includes(32)) {
-        setValue('ivaCondition', 1); // Responsable Inscripto
-      } else if (impIds.includes(20)) {
-        setValue('ivaCondition', 6); // Monotributista
-      } else if (impIds.includes(34)) {
-        setValue('ivaCondition', 4); // Exento
+      // Condición de IVA inferida por el backend (condicionIvaDesdePadron)
+      const sugerida = persona.condicionIvaSugerida;
+      if (sugerida?.condicionIva) {
+        setValue('ivaCondition', sugerida.condicionIva);
+      } else if (sugerida?.motivo) {
+        toast(`No se pudo determinar la condición de IVA: ${sugerida.motivo}`, { duration: 8000 });
       }
 
       setCuitFound(true);
