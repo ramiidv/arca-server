@@ -119,95 +119,114 @@ export interface InvoiceStats {
   byType: { cbteTipo: number; count: number; total: number }[];
 }
 
-// ARCA
+// ARCA — los campos siguen los nombres camelCase de los SDKs @ramiidv/arca-* (facturacion 6, cdc 0.6...)
 
-/** Ítem de las tablas de parámetros de WSFEv1 (`FEParamGet*`) */
+/** Ítem de las tablas de parámetros de WSFEv1 (`getTipos*`, `getMonedas`, `getCondicionesIva`) */
 export interface ParamAfip {
-  Id: number | string;
-  Desc: string;
-  FchDesde?: string;
-  FchHasta?: string;
-  Cmp_Clase?: string;
+  /** Numérico en casi todas las tablas; string en monedas (`PES`, `DOL`, `060`) */
+  id: number | string;
+  desc: string;
+  fchDesde?: string;
+  fchHasta?: string;
+  /** Solo en condiciones de IVA: clases de comprobante para las que vale (ej: "A/M/C") */
+  cmpClase?: string;
 }
 
+/** Punto de venta (`getPuntosVenta`) */
 export interface PuntoVenta {
-  Nro: number;
-  EmisionTipo: string;
-  Bloqueado: string;
-  FchBaja: string;
+  nro: number;
+  emisionTipo?: string;
+  /** "S" o "N" */
+  bloqueado?: string;
+  fchBaja?: string;
 }
 
-/** `FEParamGetCotizacion` (ResultGet) */
+/** `getCotizacion` */
 export interface Cotizacion {
-  MonId: string;
-  MonCotiz: number;
+  monId: string;
+  monCotiz: number;
   /** YYYYMMDD */
-  FchCotiz: string;
+  fchCotiz: string;
 }
 
-/** `FECompConsultar` (ResultGet) con las listas como arrays */
+/** Último comprobante autorizado (`/afip/last-voucher`) */
+export interface UltimoComprobante {
+  cbteNro: number;
+  ptoVta: number;
+  cbteTipo: number;
+}
+
+/** `consultarComprobante` (`FECompConsultarResult.resultGet`) con las listas siempre presentes */
 export interface ComprobanteAfip {
-  Concepto: number;
-  DocTipo: number;
-  DocNro: number;
-  CbteDesde: number;
-  CbteHasta: number;
-  CbteFch: string;
-  ImpTotal: number;
-  ImpTotConc: number;
-  ImpNeto: number;
-  ImpOpEx: number;
-  ImpTrib: number;
-  ImpIVA: number;
-  FchServDesde?: string;
-  FchServHasta?: string;
-  FchVtoPago?: string;
-  MonId: string;
-  MonCotiz: number;
-  Resultado: 'A' | 'R';
-  CodAutorizacion: string;
-  EmisionTipo: string;
-  FchVto: string;
-  FchProceso: string;
-  PtoVta: number;
-  CbteTipo: number;
-  CondicionIVAReceptorId?: number;
-  Iva: { Id: number; BaseImp: number; Importe: number }[];
-  Tributos: { Id: number; Desc?: string; BaseImp: number; Alic?: number; Importe: number }[];
-  CbtesAsoc: { Tipo: number; PtoVta: number; Nro: number }[];
-  Opcionales: { Id: string; Valor: string }[];
-  Observaciones: { Code: number; Msg: string }[];
-  Events: { Code: number; Msg: string }[];
+  concepto: number;
+  docTipo: number;
+  docNro: number;
+  cbteDesde: number;
+  cbteHasta: number;
+  cbteFch?: string;
+  impTotal: number;
+  impTotConc: number;
+  impNeto: number;
+  impOpEx: number;
+  impTrib: number;
+  impIva: number;
+  fchServDesde?: string;
+  fchServHasta?: string;
+  fchVtoPago?: string;
+  monId?: string;
+  monCotiz?: number;
+  resultado?: 'A' | 'R';
+  codAutorizacion?: string;
+  /** "CAE" o "CAEA" */
+  emisionTipo?: string;
+  fchVto?: string;
+  fchProceso?: string;
+  ptoVta: number;
+  cbteTipo: number;
+  condicionIvaReceptorId?: number;
+  canMisMonExt?: string;
+  iva: { id: number; baseImp: number; importe: number }[];
+  tributos: { id: number; desc?: string; baseImp: number; alic: number; importe: number }[];
+  cbtesAsoc: { tipo: number; ptoVta: number; nro: number; cuit?: string | number; cbteFch?: string }[];
+  opcionales: { id: string; valor: string }[];
+  observaciones: MensajeArca[];
+  /** `Events` de ARCA */
+  events: MensajeArca[];
 }
 
 export type CbteModo = 'CAE' | 'CAI' | 'CAEA';
 
-/** Bloque `CmpReq` de WSCDC */
+/** Input de `constatar` (WSCDC, arca-cdc 0.6) */
 export interface ConstatarInput {
-  CbteModo: CbteModo;
-  CuitEmisor: string;
-  PtoVta: number;
-  CbteTipo: number;
-  CbteNro: number;
-  CbteFch: string;
-  ImpTotal: number;
-  CodAutorizacion: string;
-  DocTipoReceptor?: number;
-  DocNroReceptor?: string;
+  cbteModo: CbteModo;
+  cuitEmisor: string;
+  ptoVta: number;
+  cbteTipo: number;
+  cbteNro: number;
+  /** YYYYMMDD o YYYY-MM-DD */
+  cbteFch: string;
+  impTotal: number;
+  codAutorizacion: string;
+  docTipoReceptor?: number;
+  docNroReceptor?: string;
+  opcionales?: { id: string; valor: string }[];
 }
 
 export interface ConstatarResult {
-  Resultado: 'A' | 'R';
-  FchProceso: string;
-  CmpResp?: Record<string, unknown>;
-  Observaciones: { Code: number; Msg: string }[];
-  Events: { Code: number; Msg: string }[];
+  resultado: 'A' | 'R';
+  /** YYYYMMDDHHMMSS */
+  fchProceso: string;
+  /** Datos del comprobante constatado (puede faltar en un rechazo) */
+  cmpResp?: Record<string, unknown>;
+  observaciones: MensajeArca[];
+  events: MensajeArca[];
 }
 
 /** Persona del padrón A4 (campos usados por la UI) */
 export interface PersonaPadron {
   idPersona: string;
-  tipoPersona: 'FISICA' | 'JURIDICA';
+  /** FISICA o JURIDICA (el SDK devuelve tal cual otros valores) */
+  tipoPersona: string;
   estadoClave?: string;
   nombre?: string;
   apellido?: string;
@@ -220,14 +239,34 @@ export interface PersonaPadron {
     tipoDomicilio?: string;
   }[];
   impuesto?: { idImpuesto: number; descripcionImpuesto?: string; estado?: string }[];
+  /** Fecha/hora y servidor de la respuesta de ARCA */
+  metadata?: { fechaHora?: string; servidor?: string };
   /** Condición de IVA inferida por el backend (null + motivo si no se puede determinar) */
   condicionIvaSugerida?: { condicionIva: number | null; motivo: string };
 }
 
-/** Health check por servicio */
+/** `dummy` de un servicio (nombres de arca-common: appserver/dbserver/authserver) */
+export interface ServerStatus {
+  appserver: string;
+  dbserver: string;
+  authserver: string;
+  [otro: string]: unknown;
+}
+
+/**
+ * Health check por servicio (`ServiceStatus` de arca-common): `ok` es true solo si
+ * todos los servidores están en OK. Con `ok: false`, `status` viene si el servicio
+ * respondió con algún servidor caído.
+ */
 export type ServicioStatus =
-  | { ok: true; status: Record<string, string> }
-  | { ok: false; error: string };
+  | { ok: true; status: ServerStatus }
+  | { ok: false; error: string; status?: ServerStatus };
+
+/** `/afip/status`: WSFEv1 y WSFEX por separado */
+export interface ArcaStatus {
+  wsfe: ServicioStatus;
+  wsfex: ServicioStatus;
+}
 
 export interface RegistroEmpleado {
   tipo: 'alta' | 'baja' | 'modificacion' | 'novedad';

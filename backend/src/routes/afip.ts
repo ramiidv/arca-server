@@ -1,12 +1,13 @@
 import { Router, Request, Response, NextFunction } from 'express';
 import fs from 'fs';
 import path from 'path';
-import { createCertificate, renewCertificate, getCertExpiry, authenticate } from 'arca-cert';
-import { arca, padron, cdc, fecred, mtxca, sire, agro, reloadArca } from '../services/arca.service';
+import { createCertificate, renewCertificate, getCertExpiry } from 'arca-cert';
+import { arca, padron, cdc, fecred, mtxca, sire, agro, reloadArca, probarCertificado, resetWsaaCooldown } from '../services/arca.service';
 import { ArcaEmpleados } from '@ramiidv/arca-empleados';
 import { condicionIvaDesdePadron } from '@ramiidv/arca-padron';
 import type { RegistroRelacionLaboral } from '@ramiidv/arca-empleados';
-import { formatDate, ensureArray } from '@ramiidv/arca-common';
+import { formatDate } from '@ramiidv/arca-common';
+import type { ServiceStatus } from '@ramiidv/arca-common';
 
 const router = Router();
 
@@ -34,24 +35,49 @@ function bodyObjeto(req: Request, res: Response): Record<string, unknown> | null
   return req.body as Record<string, unknown>;
 }
 
-/** Resultado de un health check por servicio, serializable (un Error se pierde en JSON). */
-function estadoServicio<T>(r: PromiseSettledResult<T>) {
-  return r.status === 'fulfilled'
-    ? { ok: true as const, status: r.value }
-    : { ok: false as const, error: r.reason instanceof Error ? r.reason.message : String(r.reason) };
+/**
+ * `ServiceStatus` de arca-common serializable (un Error se pierde en JSON):
+ * `{ ok: true, status }` o `{ ok: false, error, status? }`. Desde arca-common
+ * 0.7, `ok` es false también si el servicio respondió con algún servidor que
+ * no está en OK (entonces viene `status` con lo informado).
+ */
+function estadoServicio(s: ServiceStatus) {
+  return s.ok
+    ? { ok: true as const, status: s.status }
+    : { ok: false as const, error: s.error.message, ...(s.status && { status: s.status }) };
 }
 
-// GET /status - WSFE server status
+/** Aplica `estadoServicio` a cada servicio de un `status()` de varios servicios. */
+function estadosServicios<K extends string>(status: Record<K, ServiceStatus>) {
+  return Object.fromEntries(
+    Object.entries<ServiceStatus>(status).map(([servicio, s]) => [servicio, estadoServicio(s)]),
+  ) as Record<K, ReturnType<typeof estadoServicio>>;
+}
+
+// GET /status - WSFEv1 y WSFEX health check (FEDummy/FEXDummy, sin autenticación):
+// { wsfe, wsfex }, cada uno { ok, status: { appserver, dbserver, authserver } } o { ok: false, error, status? }
 router.get('/status', async (_req: Request, res: Response, next: NextFunction) => {
   try {
-    const { wsfe } = await arca.status();
-    if (!wsfe.ok) throw wsfe.error;
-    // El frontend espera los nombres de WSFE (AppServer/DbServer/AuthServer).
-    const { appserver, dbserver, authserver } = wsfe.status;
-    res.json({ success: true, data: { AppServer: appserver, DbServer: dbserver, AuthServer: authserver } });
+    res.json({ success: true, data: estadosServicios(await arca.status()) });
   } catch (error) {
     next(error);
   }
+});
+
+// POST /wsaa-reset - Vuelve a habilitar el login en WSAA después de corregir un error
+// permanente (certificado vencido o no confiable, servicio no autorizado...). Con arca-common
+// 0.7 el WsaaClient compartido no pide más tickets para ese servicio hasta esto.
+router.post('/wsaa-reset', (_req: Request, res: Response) => {
+  const reiniciado = resetWsaaCooldown();
+  res.json({
+    success: true,
+    data: {
+      reset: reiniciado,
+      message: reiniciado
+        ? 'Autenticación con WSAA habilitada: el próximo pedido vuelve a solicitar el ticket.'
+        : 'Los servicios de ARCA todavía no se inicializaron: no había nada que reiniciar.',
+    },
+  });
 });
 
 // GET /invoice-types - Available invoice types
@@ -114,7 +140,7 @@ router.get('/currency-types', async (_req: Request, res: Response, next: NextFun
   }
 });
 
-// GET /puntos-venta - Available sales points
+// GET /puntos-venta - Available sales points: [{ nro, emisionTipo?, bloqueado?, fchBaja? }]
 router.get('/puntos-venta', async (_req: Request, res: Response, next: NextFunction) => {
   try {
     const puntosVenta = await arca.getPuntosVenta();
@@ -133,7 +159,9 @@ router.get('/contribuyente/:cuit', async (req: Request, res: Response, next: Nex
     // CUIT inexistente o inactiva: ArcaPadronServiceError (404 / 422 en errorHandler)
     const persona = await padron.getPersona(cuit);
     // Condición de IVA inferida de los impuestos (null + motivo si no se puede determinar):
-    // sirve para completar condicionIva al facturar (RG 5616).
+    // sirve para completar condicionIva al facturar (RG 5616). El motivo advierte si ARCA
+    // informó un errorConstancia (ej: CUIT limitada) aunque la condición se haya determinado.
+    // La persona incluye `metadata` ({ fechaHora, servidor }) de la respuesta de ARCA.
     const condicionIva = condicionIvaDesdePadron(persona);
     res.json({ success: true, data: { ...persona, condicionIvaSugerida: condicionIva } });
   } catch (error) {
@@ -157,21 +185,19 @@ router.get('/contribuyente-basic/:cuit', async (req: Request, res: Response, nex
 // GET /padron-status - Padrón services health check (un resultado por servicio: a5, a4, a10, a13, a100)
 router.get('/padron-status', async (_req: Request, res: Response, next: NextFunction) => {
   try {
-    const status = await padron.status();
-    const data = Object.fromEntries(
-      Object.entries(status).map(([servicio, r]) => [servicio, estadoServicio(r)]),
-    );
-    res.json({ success: true, data });
+    res.json({ success: true, data: estadosServicios(await padron.status()) });
   } catch (error) {
     next(error);
   }
 });
 
 // POST /constatar - Verify a comprobante via WSCDC
-// Body = CmpReq del WSDL: CbteModo (CAE|CAI|CAEA), CuitEmisor, PtoVta, CbteTipo, CbteNro, CbteFch,
-// ImpTotal, CodAutorizacion, DocTipoReceptor?, DocNroReceptor?, Opcionales?. Lo valida el SDK.
-// Resultado "R" es un rechazo funcional (se devuelve 200 con Observaciones); los Errors de ARCA
-// llegan como ArcaServiceError (422).
+// Body = ConstatarInput de arca-cdc (camelCase): cbteModo (CAE|CAI|CAEA), cuitEmisor, ptoVta,
+// cbteTipo, cbteNro, cbteFch, impTotal, codAutorizacion, docTipoReceptor?, docNroReceptor?,
+// opcionales?: [{ id, valor }]. Lo valida el SDK (ArcaValidationError → 400).
+// Devuelve { resultado, fchProceso, cmpResp?, observaciones, events }. Resultado "R" es un rechazo
+// funcional (200 con observaciones; cmpResp puede faltar); los Errors de ARCA llegan como
+// ArcaServiceError (422) y una respuesta con forma inesperada como ArcaResponseError (502).
 router.post('/constatar', async (req: Request, res: Response, next: NextFunction) => {
   try {
     const body = bodyObjeto(req, res);
@@ -183,7 +209,7 @@ router.post('/constatar', async (req: Request, res: Response, next: NextFunction
   }
 });
 
-// GET /cdc-status - WSCDC health check
+// GET /cdc-status - WSCDC health check: { appserver, dbserver, authserver } (lanza si no responde)
 router.get('/cdc-status', async (_req: Request, res: Response, next: NextFunction) => {
   try {
     const status = await cdc.status();
@@ -218,9 +244,10 @@ router.get('/last-voucher', async (req: Request, res: Response, next: NextFuncti
     }
 
     const cbteNro = await arca.ultimoComprobante(puntoVenta, cbteTipo);
+    // Mismos nombres que FECompUltimoAutorizadoResult del SDK
     res.json({
       success: true,
-      data: { CbteNro: cbteNro, PtoVta: puntoVenta, CbteTipo: cbteTipo },
+      data: { cbteNro, ptoVta: puntoVenta, cbteTipo },
     });
   } catch (error) {
     next(error);
@@ -242,20 +269,21 @@ router.get('/comprobante', async (req: Request, res: Response, next: NextFunctio
       return;
     }
 
-    // FECompConsultarResult: ResultGet obligatorio (el SDK lanza si falta). Las listas
-    // anidadas del SOAP ({ AlicIva: x | x[] }) se devuelven como arrays planos.
-    const comprobante = await arca.consultarComprobante(cbteTipo, puntoVenta, cbteNro);
-    const r = comprobante.ResultGet;
+    // FECompConsultarResult (arca-facturacion 6): resultGet en camelCase con las listas ya
+    // como arrays; si ARCA las omite quedan undefined, acá se devuelven siempre como arrays.
+    // Un comprobante inexistente es ArcaWSFEError 602 (422). Muchos campos son opcionales
+    // (cbteFch, resultado, codAutorizacion, monId...): ARCA puede omitirlos.
+    const { resultGet: r, events } = await arca.consultarComprobante(cbteTipo, puntoVenta, cbteNro);
     res.json({
       success: true,
       data: {
         ...r,
-        Iva: ensureArray(r.Iva?.AlicIva),
-        Tributos: ensureArray(r.Tributos?.Tributo),
-        CbtesAsoc: ensureArray(r.CbtesAsoc?.CbteAsoc),
-        Opcionales: ensureArray(r.Opcionales?.Opcional),
-        Observaciones: ensureArray(r.Observaciones?.Obs),
-        Events: ensureArray(comprobante.Events?.Evt),
+        iva: r.iva ?? [],
+        tributos: r.tributos ?? [],
+        cbtesAsoc: r.cbtesAsoc ?? [],
+        opcionales: r.opcionales ?? [],
+        observaciones: r.observaciones ?? [],
+        events: events ?? [],
       },
     });
   } catch (error) {
@@ -281,7 +309,7 @@ router.get('/cotizacion', async (req: Request, res: Response, next: NextFunction
       return;
     }
 
-    // ResultGet: { MonId, MonCotiz: number, FchCotiz: YYYYMMDD }
+    // { monId, monCotiz: number, fchCotiz: YYYYMMDD }
     const cotizacion = await arca.getCotizacion(monedaId, fecha ? { fecha } : undefined);
     res.json({ success: true, data: cotizacion });
   } catch (error) {
@@ -428,30 +456,19 @@ router.get('/cert-info', async (_req: Request, res: Response, next: NextFunction
 // POST /test-cert - Test current certificate against WSAA
 router.post('/test-cert', async (req: Request, res: Response, next: NextFunction) => {
   try {
-    const { environment } = req.body;
-    const certPath = path.resolve(__dirname, '../../certs/cert.crt');
-    const keyPath = path.resolve(__dirname, '../../certs/key.key');
-
-    if (!fs.existsSync(certPath) || !fs.existsSync(keyPath)) {
-      res.status(400).json({ success: false, error: 'No hay certificado instalado' });
+    const { environment } = req.body ?? {};
+    if (environment !== undefined && environment !== 'production' && environment !== 'testing') {
+      res.status(400).json({ success: false, error: "environment must be 'production' or 'testing'" });
       return;
     }
-
-    const cert = fs.readFileSync(certPath, 'utf8');
-    const key = fs.readFileSync(keyPath, 'utf8');
-
-    const credentials = await authenticate({
-      cert,
-      key,
-      service: 'wsfe',
-      environment: environment || 'production',
-    });
+    // Sin certificado instalado, probarCertificado responde 503 (AppError).
+    const ticket = await probarCertificado((environment ?? 'production') === 'production');
 
     res.json({
       success: true,
       data: {
         valid: true,
-        expirationTime: credentials.expirationTime.toISOString(),
+        expirationTime: ticket.expirationTime,
         message: 'Certificado válido. Autenticación con WSAA exitosa.',
       },
     });
@@ -483,7 +500,7 @@ router.get('/fecred-obligado/:cuit', async (req: Request, res: Response, next: N
       res.status(400).json({ success: false, error: 'fechaEmision must be YYYYMMDD or YYYY-MM-DD' });
       return;
     }
-    // { obligado: boolean, montoDesde?, observaciones }
+    // { obligado?: boolean, montoDesde?, observaciones }: obligado falta si ARCA solo devolvió observaciones
     const result = await fecred.consultarMontoObligadoRecepcion({ cuitConsultada: cuit, fechaEmision });
     res.json({ success: true, data: result });
   } catch (error) { next(error); }
@@ -491,7 +508,8 @@ router.get('/fecred-obligado/:cuit', async (req: Request, res: Response, next: N
 
 // POST /fecred-ctas-ctes - Query FCE current accounts
 // Body: { rol: 'Emisor' | 'Receptor', cuitContraparte?, fecha?: { tipo, desde, hasta }, estadoCtaCte?, nroPagina?, opcionTransferencia? }
-// Devuelve { ctasCtes, nroPagina?, hayMas?, evento?, observaciones } (paginado).
+// Devuelve { ctasCtes, nroPagina?, hayMas?, evento?, observaciones } (paginado). Los estados
+// (estadoCtaCte.estado, etc.) son abiertos: un valor nuevo de ARCA se devuelve tal cual.
 router.post('/fecred-ctas-ctes', async (req: Request, res: Response, next: NextFunction) => {
   try {
     const body = bodyObjeto(req, res);
@@ -537,20 +555,36 @@ router.get('/mtxca-status', async (_req: Request, res: Response, next: NextFunct
 
 // POST /mtxca-autorizar - Authorize invoice with item detail
 // Body = ComprobanteType con los nombres del XSD (codigoTipoComprobante, numeroPuntoVenta,
-// importeSubtotal, codigoMoneda, items[], subtotalesIVA[], ...). Un rechazo NO lanza:
-// devuelve resultado "R" con errores → se responde 422.
+// importeSubtotal, codigoMoneda, condicionIVAReceptor (obligatoria desde arca-mtxca 0.6),
+// items[], subtotalesIVA[], ...). El SDK redondea mitad al par (manual WSMTXCA) y valida las
+// reglas de FCE (fechaVencimientoPago en 201/206). Un rechazo NO lanza: devuelve resultado "R"
+// con errores → se responde 422. Si se autorizó, se agrega `urlQR` (RG 4892).
 router.post('/mtxca-autorizar', async (req: Request, res: Response, next: NextFunction) => {
   try {
     const body = bodyObjeto(req, res);
     if (!body) return;
-    const result = await mtxca.autorizar(body as unknown as Parameters<typeof mtxca.autorizar>[0]);
+    const comprobante = body as unknown as Parameters<typeof mtxca.autorizar>[0];
+    const result = await mtxca.autorizar(comprobante);
     if (result.resultado === 'R') {
       res.status(422).json({ success: false, error: 'ARCA rechazó el comprobante', data: result });
       return;
     }
-    res.json({ success: true, data: result });
+    res.json({ success: true, data: { ...result, urlQR: qrMtxca(comprobante, result) } });
   } catch (error) { next(error); }
 });
+
+/** URL del QR de un comprobante MTXCA autorizado. Un QR que no se puede armar no invalida la autorización. */
+function qrMtxca(
+  comprobante: Parameters<typeof mtxca.urlQR>[0],
+  resultado: Parameters<typeof mtxca.urlQR>[1],
+): string | undefined {
+  try {
+    return mtxca.urlQR(comprobante, resultado);
+  } catch (e) {
+    console.error('[MTXCA] No se pudo generar el QR:', (e as Error).message);
+    return undefined;
+  }
+}
 
 // GET /mtxca-ultimo-comprobante - Last authorized voucher (MTXCA)
 router.get('/mtxca-ultimo-comprobante', async (req: Request, res: Response, next: NextFunction) => {
@@ -562,7 +596,7 @@ router.get('/mtxca-ultimo-comprobante', async (req: Request, res: Response, next
       return;
     }
     const cbteNro = await mtxca.ultimoComprobante(ptoVta, cbteTipo);
-    res.json({ success: true, data: { CbteNro: cbteNro } });
+    res.json({ success: true, data: { cbteNro, ptoVta, cbteTipo } });
   } catch (error) { next(error); }
 });
 
@@ -570,7 +604,8 @@ router.get('/mtxca-ultimo-comprobante', async (req: Request, res: Response, next
 // SIRE — Retenciones Electrónicas
 // ============================================================
 
-// GET /sire-status - SIRE health check
+// GET /sire-status - SIRE health check: { appserver, dbserver, authserver, headerInfo? }
+// (headerInfo: ambiente, fecha, vCore, v2005 del header SOAP: sirve para detectar un entorno equivocado)
 router.get('/sire-status', async (_req: Request, res: Response, next: NextFunction) => {
   try {
     const status = await sire.status();
@@ -581,8 +616,11 @@ router.get('/sire-status', async (_req: Request, res: Response, next: NextFuncti
 // POST /sire-emitir (alias: /sire-retencion) - Emit a retention certificate (operación `emitir`)
 // Body = EmitirCertificadoParams: regimen, fechaRetencion, imposibilidadRetencion, importeRetencion,
 // importeBaseCalculo, regimenExclusion, tipoComprobante, fechaComprobante, numeroComprobante,
-// importeComprobante, cuitRetenido, ... Lo valida el SDK. Devuelve { certificadoNro, codigoSeguridad }.
-// Ante un ArcaSoapError incierto no se reenvía: SIRE no tiene consulta (verificar en el micrositio).
+// importeComprobante, cuitRetenido, ... Lo valida el SDK, incluidas las reglas de fechas del manual
+// (fechaRetencion >= 2019-12-01, fechaComprobante <= fechaRetencion; iguales en los tipos 3, 19 y 20).
+// Devuelve { certificadoNro, codigoSeguridad }. Un Fault de token/sign es ArcaAuthError (503); un
+// Fault Client, ArcaSireServiceError (422). Ante un ArcaSoapError incierto no se reenvía: SIRE no
+// tiene consulta (verificar en el micrositio).
 const emitirCertificado = async (req: Request, res: Response, next: NextFunction) => {
   try {
     const body = bodyObjeto(req, res);
@@ -609,24 +647,19 @@ router.post('/sire-anular', async (req: Request, res: Response, next: NextFuncti
 // AGRO — Servicios Agropecuarios
 // ============================================================
 
-// GET /agro-status - WSCPE y WSLPG health check: { cpe, lpg } con { ok, status | error }
+// GET /agro-status - WSCPE y WSLPG health check: { cpe, lpg } con { ok, status } o { ok: false, error, status? }
 router.get('/agro-status', async (_req: Request, res: Response, next: NextFunction) => {
   try {
-    const status = await agro.status();
-    const data = Object.fromEntries(
-      Object.entries(status).map(([servicio, s]) => [
-        servicio,
-        s.ok ? { ok: true, status: s.status } : { ok: false, error: s.error.message },
-      ]),
-    );
-    res.json({ success: true, data });
+    res.json({ success: true, data: estadosServicios(await agro.status()) });
   } catch (error) { next(error); }
 });
 
 // POST /agro-cpe-autorizar - Authorize Carta de Porte automotor (WSCPE)
 // Body = AutorizarCPEAutomotorParams según el XSD: { cabecera, origen, correspondeRetiroProductor,
 // esSolicitanteCampo, datosCarga, destino, destinatario, transporte, ... }. WSCTG ya no existe:
-// el número de CTG viene en cabecera.nroCTG de la respuesta.
+// el número de CTG viene en cabecera.nroCTG de la respuesta. Si ARCA no pudo generar el PDF
+// (error 550) la CPE igual queda autorizada: la respuesta trae `advertencias` y no trae `pdf`.
+// Errores junto con el resultado → ArcaAgroServiceError con uncertain (502: consultar antes de reintentar).
 router.post('/agro-cpe-autorizar', async (req: Request, res: Response, next: NextFunction) => {
   try {
     const body = bodyObjeto(req, res);
@@ -638,6 +671,7 @@ router.post('/agro-cpe-autorizar', async (req: Request, res: Response, next: Nex
 
 // POST /agro-lpg-autorizar - Authorize grain settlement (WSLPG)
 // Body: { liquidacion, deducciones?, retenciones?, percepciones? } según LpgLiquidacionBaseType.
+// El error 1021 (PDF) no cancela la liquidación: vuelve en `advertencias`.
 router.post('/agro-lpg-autorizar', async (req: Request, res: Response, next: NextFunction) => {
   try {
     const body = bodyObjeto(req, res);
@@ -655,8 +689,12 @@ const TIPOS_REGISTRO = ['alta', 'baja', 'modificacion', 'novedad'] as const;
 type TipoRegistro = (typeof TIPOS_REGISTRO)[number];
 
 // POST /empleados-generar[?formato=txt] - Generate the fixed-width (130 positions) TXT file
-// Body: { registros: [{ tipo: 'alta' | 'baja' | 'modificacion' | 'novedad', data }], strict? }
+// Body: { registros: [{ tipo: 'alta' | 'baja' | 'modificacion' | 'novedad', data }], strict?, fechaReferencia? }
 // - alta (AT), baja (BT, fecha en fechaFin), modificacion (MR); novedad recibe { movimiento, cuil, ... }.
+// - fechaInicio (inicio del vínculo) es obligatoria en todos los movimientos (arca-empleados 0.5),
+//   y las propiedades que no son del diseño de registro se rechazan (ArcaValidationError → 400).
+// - fechaReferencia (YYYY-MM-DD, opcional): fecha de la novedad para validar que un alta no tenga
+//   fechaInicio más de 90 días posterior (default: hoy en Argentina).
 // - Por defecto responde JSON con { contenido, lineas, encoding, resumen }.
 // - Con ?formato=txt devuelve el archivo para descargar (ISO-8859-1, CRLF).
 router.post('/empleados-generar', async (req: Request, res: Response, next: NextFunction) => {
@@ -667,13 +705,17 @@ router.post('/empleados-generar', async (req: Request, res: Response, next: Next
       return;
     }
 
-    const { registros, strict } = req.body ?? {};
+    const { registros, strict, fechaReferencia } = req.body ?? {};
     if (!Array.isArray(registros) || registros.length === 0) {
       res.status(400).json({ success: false, error: 'registros must be a non-empty array' });
       return;
     }
     if (strict !== undefined && typeof strict !== 'boolean') {
       res.status(400).json({ success: false, error: 'strict must be a boolean' });
+      return;
+    }
+    if (fechaReferencia !== undefined && (typeof fechaReferencia !== 'string' || !FECHA_RE.test(fechaReferencia))) {
+      res.status(400).json({ success: false, error: 'fechaReferencia must be YYYYMMDD or YYYY-MM-DD' });
       return;
     }
     const invalido = registros.findIndex(
@@ -690,7 +732,10 @@ router.post('/empleados-generar', async (req: Request, res: Response, next: Next
       return;
     }
 
-    const builder = new ArcaEmpleados(strict === undefined ? {} : { strict });
+    const builder = new ArcaEmpleados({
+      ...(strict !== undefined && { strict }),
+      ...(fechaReferencia !== undefined && { fechaReferencia }),
+    });
     for (const reg of registros as { tipo: TipoRegistro; data: any }[]) {
       switch (reg.tipo) {
         case 'alta': builder.alta(reg.data); break;

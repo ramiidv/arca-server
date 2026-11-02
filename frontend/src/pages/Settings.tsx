@@ -7,11 +7,19 @@ import {
   ExclamationTriangleIcon,
   ClockIcon,
 } from '@heroicons/react/24/outline';
-import { getAfipStatus, generateCert, renewCert, getCertInfo, testCert } from '../api/client';
+import { getAfipStatus, generateCert, renewCert, getCertInfo, testCert, resetWsaa } from '../api/client';
 import { getApiErrorMessage } from '../utils/errors';
+import type { ArcaStatus, ServicioStatus } from '../types';
+
+/** Servidores que informa el `dummy` de cada servicio (nombres del SDK). */
+const SERVIDORES = [
+  ['appserver', 'AppServer'],
+  ['dbserver', 'DbServer'],
+  ['authserver', 'AuthServer'],
+] as const;
 
 export default function Settings() {
-  const [afipStatus, setAfipStatus] = useState<Record<string, string> | null>(null);
+  const [afipStatus, setAfipStatus] = useState<ArcaStatus | null>(null);
   const [checkingStatus, setCheckingStatus] = useState(false);
 
   // Cert info
@@ -87,6 +95,21 @@ export default function Settings() {
       toast.error(getApiErrorMessage(err, 'Error al generar el certificado'), { duration: 8000 });
     } finally {
       setGeneratingCert(false);
+    }
+  };
+
+  // Tras un error permanente de WSAA (certificado vencido, servicio no autorizado...) el SDK no
+  // vuelve a pedir tickets hasta que se corrija la causa y se limpie la espera.
+  const [resettingWsaa, setResettingWsaa] = useState(false);
+  const handleResetWsaa = async () => {
+    try {
+      setResettingWsaa(true);
+      const result = await resetWsaa();
+      toast.success(result.message);
+    } catch (err) {
+      toast.error(getApiErrorMessage(err, 'No se pudo reiniciar la autenticación'), { duration: 8000 });
+    } finally {
+      setResettingWsaa(false);
     }
   };
 
@@ -283,23 +306,22 @@ export default function Settings() {
         </div>
 
         {afipStatus ? (
-          <div className="space-y-2">
-            {['AppServer', 'DbServer', 'AuthServer'].map((server) => (
-              <div key={server} className="flex items-center justify-between rounded-lg border border-gray-100 px-3 py-2.5">
-                <span className="text-sm font-medium text-gray-700">{server}</span>
-                <span className="flex items-center gap-1.5">
-                  {afipStatus[server] === 'OK' ? (
-                    <><span className="h-1.5 w-1.5 rounded-full bg-emerald-400" /><span className="text-xs font-medium text-emerald-700">OK</span></>
-                  ) : (
-                    <><span className="h-1.5 w-1.5 rounded-full bg-red-400" /><span className="text-xs font-medium text-red-700">{afipStatus[server] || 'Error'}</span></>
-                  )}
-                </span>
-              </div>
-            ))}
+          <div className="space-y-4">
+            <EstadoServicio nombre="WSFEv1 (facturación)" estado={afipStatus.wsfe} />
+            <EstadoServicio nombre="WSFEX (exportación)" estado={afipStatus.wsfex} />
           </div>
         ) : (
           <p className="py-4 text-center text-sm text-gray-400">Hacé clic en "Verificar" para comprobar la conexión con AFIP</p>
         )}
+
+        <div className="mt-4 flex flex-wrap items-center justify-between gap-2 border-t border-gray-100 pt-4">
+          <p className="text-xs text-gray-500">
+            Si WSAA rechazó el certificado (vencido, servicio no autorizado), corregí la causa y reintentá la autenticación.
+          </p>
+          <button onClick={handleResetWsaa} disabled={resettingWsaa} className="btn-secondary text-xs">
+            <ArrowPathIcon className={`h-4 w-4 ${resettingWsaa ? 'animate-spin' : ''}`} /> Reintentar autenticación
+          </button>
+        </div>
       </div>
 
       {/* App Info */}
@@ -316,10 +338,36 @@ export default function Settings() {
           </div>
           <div className="flex justify-between">
             <span>SDK</span>
-            <span className="text-xs font-medium">@ramiidv/arca-sdk + arca-cert</span>
+            <span className="text-xs font-medium">@ramiidv/arca-facturacion, -padron, -cdc, -fecred, -mtxca, -sire, -agro, -empleados + arca-cert</span>
           </div>
         </div>
       </div>
+    </div>
+  );
+}
+
+/** Estado de un servicio de ARCA (`{ ok, status }` o `{ ok: false, error, status? }`). */
+function EstadoServicio({ nombre, estado }: { nombre: string; estado: ServicioStatus }) {
+  return (
+    <div className="space-y-2">
+      <p className="text-xs font-semibold uppercase tracking-wider text-gray-400">{nombre}</p>
+      {!estado.ok && <p className="text-xs text-red-600">{estado.error}</p>}
+      {estado.status &&
+        SERVIDORES.map(([campo, etiqueta]) => {
+          const valor = estado.status?.[campo];
+          return (
+            <div key={campo} className="flex items-center justify-between rounded-lg border border-gray-100 px-3 py-2.5">
+              <span className="text-sm font-medium text-gray-700">{etiqueta}</span>
+              <span className="flex items-center gap-1.5">
+                {valor === 'OK' ? (
+                  <><span className="h-1.5 w-1.5 rounded-full bg-emerald-400" /><span className="text-xs font-medium text-emerald-700">OK</span></>
+                ) : (
+                  <><span className="h-1.5 w-1.5 rounded-full bg-red-400" /><span className="text-xs font-medium text-red-700">{valor || 'Error'}</span></>
+                )}
+              </span>
+            </div>
+          );
+        })}
     </div>
   );
 }

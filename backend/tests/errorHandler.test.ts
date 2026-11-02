@@ -31,6 +31,8 @@ import {
   ArcaWSFEError,
   ArcaResultadoIncierto,
   ArcaResultadoInciertoExpo,
+  ArcaConflictoExpo,
+  ArcaResponseError,
 } from '@ramiidv/arca-facturacion';
 import { ArcaPadronServiceError, ArcaPadronError } from '@ramiidv/arca-padron';
 import { ArcaAgroServiceError, ArcaAgroResponseError } from '@ramiidv/arca-agro';
@@ -70,7 +72,7 @@ describe('errorHandler: errores de los SDKs de ARCA', () => {
   });
 
   it('ArcaResultadoInciertoExpo → 502 con el Id para reenviar (sin el request completo)', () => {
-    const request = { Id: 77, Cbte_Tipo: 19, Punto_vta: 2, Cbte_nro: 5, Fecha_cbte: '20261101' } as any;
+    const request = { id: 77, cbteTipo: 19, puntoVta: 2, cbteNro: 5, fechaCbte: '20261101' } as any;
     const { status, body } = run(new ArcaResultadoInciertoExpo(request));
     expect(status).toBe(502);
     expect(body.uncertain).toBe(true);
@@ -85,10 +87,55 @@ describe('errorHandler: errores de los SDKs de ARCA', () => {
     expect(body.service).toBe('wsfe');
   });
 
-  it('ArcaAuthError → 503', () => {
-    const { status, body } = run(new ArcaAuthError('certificado vencido'));
+  it('ArcaConflictoExpo → 409 con el Id y los comprobantes enviado/respondido (sin el request completo)', () => {
+    const request = { id: 77, cbteTipo: 19, puntoVta: 2, cbteNro: 5, fechaCbte: '20261101', cliente: 'ACME' } as any;
+    const respuesta = {
+      fexResultAuth: { id: 77, cuit: 20123456786, cbteTipo: 19, puntoVta: 2, cbteNro: 4, cae: '71234567890123', resultado: 'A', reproceso: 'S' },
+    } as any;
+    const { status, body } = run(new ArcaConflictoExpo(request, respuesta, 'el Id ya lo usaba el comprobante 4'));
+    expect(status).toBe(409);
+    expect(body.code).toBe('ARCA_CONFLICTO_EXPO');
+    expect(body.details).toEqual({
+      id: 77,
+      enviado: { cbteTipo: 19, ptoVta: 2, cbteNro: 5 },
+      respuesta: { cbteTipo: 19, ptoVta: 2, cbteNro: 4, resultado: 'A', reproceso: 'S' },
+    });
+    expect(JSON.stringify(body)).not.toContain('ACME');
+    expect(JSON.stringify(body)).not.toContain('71234567890123');
+  });
+
+  it('ArcaAuthError → 503 con retryable y faultCode', () => {
+    const { status, body } = run(new ArcaAuthError('WSAA no disponible', { retryable: true, faultCode: 'ns1:wsaa.unavailable' }));
     expect(status).toBe(503);
     expect(body.code).toBe('ARCA_AUTH_ERROR');
+    expect(body).toMatchObject({ retryable: true, blocked: false, faultCode: 'ns1:wsaa.unavailable' });
+    expect(body.error).toMatch(/Reintentá/);
+  });
+
+  it('ArcaAuthError permanente de WSAA (cms.cert.expired) → blocked con instrucciones para reintentar', () => {
+    const { status, body } = run(
+      new ArcaAuthError('WSAA rechazó el login para servicio "wsfe" ... resetLoginCooldown("wsfe")', {
+        faultCode: 'ns1:cms.cert.expired',
+        statusCode: 500,
+      }),
+    );
+    expect(status).toBe(503);
+    expect(body).toMatchObject({ retryable: false, blocked: true, faultCode: 'ns1:cms.cert.expired' });
+    expect(body.error).toMatch(/bloqueado/);
+    expect(body.error).toMatch(/wsaa-reset/);
+  });
+
+  it('ArcaAuthError por WSFE 600/601 (ticket rechazado) → no está bloqueado, explica la relación en ARCA', () => {
+    const cause = new ArcaWSFEError([{ code: 600, msg: 'ValidacionDeToken: No aparecio CUIT en lista de relaciones' }]);
+    const { status, body } = run(new ArcaAuthError('x', { cause, faultCode: '600' }));
+    expect(status).toBe(503);
+    expect(body).toMatchObject({ retryable: false, blocked: false, faultCode: '600' });
+    expect(body.error).toMatch(/relaci/);
+  });
+
+  it('wsn.unavailable de WSAA no se considera bloqueo permanente', () => {
+    const { body } = run(new ArcaAuthError('x', { faultCode: 'ns1:wsn.unavailable', retryable: true }));
+    expect(body.blocked).toBe(false);
   });
 
   it('ArcaPadronServiceError: inexistente → 404, inactiva → 422 (antes que ArcaServiceError)', () => {
@@ -110,6 +157,13 @@ describe('errorHandler: errores de los SDKs de ARCA', () => {
     expect(status).toBe(422);
     expect(body.code).toBe('ARCA_WSFE_ERROR');
     expect(body.errors).toEqual([{ code: 10015, msg: 'DocNro invalido' }]);
+  });
+
+  it('ArcaAgroServiceError incierto (errores + resultado) → 502 con uncertain', () => {
+    const err = new ArcaAgroServiceError('WSCPE x', [{ code: 7, msg: 'aviso' }], 'WSCPE', 'autorizarCPEAutomotor', {}, true);
+    const { status, body } = run(err);
+    expect(status).toBe(502);
+    expect(body).toMatchObject({ uncertain: true, code: 'ARCA_AGRO_SERVICE_ERROR', errors: [{ code: 7, msg: 'aviso' }] });
   });
 
   it('ArcaServiceError y subclases de otros SDKs → 422 con errors', () => {
@@ -149,8 +203,35 @@ describe('errorHandler: errores de los SDKs de ARCA', () => {
     expect(body.soapFault).toEqual({ faultcode: 'soap:Server', faultstring: 'Token expirado' });
   });
 
-  it('ArcaAgroResponseError, ArcaPadronError y ArcaSerializationError', () => {
-    expect(run(new ArcaAgroResponseError('sin COE', true)).body).toMatchObject({ uncertain: true });
+  it('ArcaSoapError no expone responseBody ni faultDetail', () => {
+    const { body } = run(
+      new ArcaSoapError('SOAP Fault: x', {
+        statusCode: 500,
+        faultCode: 'soap:Server',
+        faultString: 'x',
+        responseBody: '<html>interno</html>',
+        faultDetail: { uuid: 'abc-secreto' },
+      }),
+    );
+    expect(body).not.toHaveProperty('responseBody');
+    expect(body).not.toHaveProperty('faultDetail');
+    expect(JSON.stringify(body)).not.toContain('abc-secreto');
+  });
+
+  it('ArcaResponseError genérico → 502 con uncertain (incierto o no)', () => {
+    const incierto = run(new ArcaResponseError('falta Resultado', true));
+    expect(incierto.status).toBe(502);
+    expect(incierto.body).toMatchObject({ code: 'ARCA_RESPONSE_ERROR', uncertain: true });
+    expect(incierto.body.error).toMatch(/antes de reintentar/);
+
+    const cierto = run(new ArcaResponseError('dummy incompleto'));
+    expect(cierto.status).toBe(502);
+    expect(cierto.body.uncertain).toBe(false);
+  });
+
+  it('ArcaAgroResponseError (subclase de ArcaResponseError), ArcaPadronError y ArcaSerializationError', () => {
+    expect(new ArcaAgroResponseError('sin COE', true)).toBeInstanceOf(ArcaResponseError);
+    expect(run(new ArcaAgroResponseError('sin COE', true)).body).toMatchObject({ uncertain: true, code: 'ARCA_AGRO_RESPONSE_ERROR' });
     expect(run(new ArcaAgroResponseError('sin COE', true)).status).toBe(502);
     expect(run(new ArcaPadronError('sin persona')).status).toBe(502);
     const ser = run(new ArcaSerializationError('no entra', { field: 'puesto', desde: 85, hasta: 88, indice: 0 }));

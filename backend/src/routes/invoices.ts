@@ -15,6 +15,7 @@ const createInvoiceSchema = z.object({
   docTipo: z.number().int().min(0),
   docNro: z.string().min(1, 'docNro is required'),
   // Condición de IVA del receptor (RG 5616). Obligatoria si docTipo != 99; si no viene se toma la del cliente.
+  // Con docTipo 99 (consumidor final sin identificar) el SDK envía 5 (Consumidor Final) si no se indica.
   condicionIva: z.number().int().positive().optional(),
   concepto: z.number().int().min(1).max(3).default(2),
   puntoVenta: z.number().int().positive(),

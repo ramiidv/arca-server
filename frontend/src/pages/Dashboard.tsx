@@ -10,7 +10,7 @@ import {
   ArrowTrendingUpIcon,
 } from '@heroicons/react/24/outline';
 import { getInvoiceStats, getInvoices, getAfipStatus } from '../api/client';
-import type { Invoice, InvoiceStats } from '../types';
+import type { ArcaStatus, Invoice, InvoiceStats } from '../types';
 import { formatCurrency, formatDate, formatCbteTipo, formatFullInvoiceNumber } from '../utils/formatters';
 import InvoiceStatusBadge from '../components/InvoiceStatusBadge';
 import { useAuth } from '../context/AuthContext';
@@ -19,7 +19,7 @@ export default function Dashboard() {
   const { user } = useAuth();
   const [stats, setStats] = useState<InvoiceStats | null>(null);
   const [recentInvoices, setRecentInvoices] = useState<Invoice[]>([]);
-  const [afipStatus, setAfipStatus] = useState<Record<string, string> | null>(null);
+  const [afipStatus, setAfipStatus] = useState<ArcaStatus | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
 
@@ -94,16 +94,19 @@ export default function Dashboard() {
         </div>
 
         {afipStatus && (
-          <div className="hidden sm:flex items-center gap-3 rounded-lg border border-gray-200/80 bg-white px-4 py-2 shadow-sm">
+          <div
+            className="hidden sm:flex items-center gap-3 rounded-lg border border-gray-200/80 bg-white px-4 py-2 shadow-sm"
+            title={afipStatus.wsfe.ok ? 'WSFEv1 operativo' : afipStatus.wsfe.error}
+          >
             <span className="text-xs font-medium text-gray-500">AFIP</span>
-            {['AppServer', 'DbServer', 'AuthServer'].map((server) => (
+            {(['appserver', 'dbserver', 'authserver'] as const).map((server) => (
               <span key={server} className="inline-flex items-center gap-1 text-[11px] text-gray-600">
-                {afipStatus[server] === 'OK' ? (
+                {afipStatus.wsfe.status?.[server] === 'OK' ? (
                   <span className="h-1.5 w-1.5 rounded-full bg-emerald-400" />
                 ) : (
                   <span className="h-1.5 w-1.5 rounded-full bg-red-400" />
                 )}
-                {server.replace('Server', '')}
+                {{ appserver: 'App', dbserver: 'Db', authserver: 'Auth' }[server]}
               </span>
             ))}
           </div>

@@ -1,6 +1,7 @@
 import fs from 'fs';
 import { ArcaFacturacion, FileTicketStorage } from '@ramiidv/arca-facturacion';
-import type { ArcaEvent, ArcaBaseConfig } from '@ramiidv/arca-common';
+import { createWsaaClient } from '@ramiidv/arca-common';
+import type { ArcaEvent, ArcaSdkConfig } from '@ramiidv/arca-common';
 import { ArcaPadron } from '@ramiidv/arca-padron';
 import { ArcaCdc } from '@ramiidv/arca-cdc';
 import { ArcaFecred } from '@ramiidv/arca-fecred';
@@ -8,6 +9,7 @@ import { ArcaMtxca } from '@ramiidv/arca-mtxca';
 import { ArcaSire } from '@ramiidv/arca-sire';
 import { ArcaAgro } from '@ramiidv/arca-agro';
 import { config } from '../config';
+import { AppError } from '../middleware/errorHandler';
 
 function errorText(error: Error | string): string {
   return error instanceof Error ? error.message : error;
@@ -40,6 +42,9 @@ function onEvent(event: ArcaEvent) {
 }
 
 function readCerts() {
+  if (!fs.existsSync(config.afip.certPath) || !fs.existsSync(config.afip.keyPath)) {
+    throw new AppError(503, 'No hay certificado de ARCA instalado: generalo desde Configuración (POST /api/afip/generate-cert).');
+  }
   return {
     cert: fs.readFileSync(config.afip.certPath, 'utf8'),
     key: fs.readFileSync(config.afip.keyPath, 'utf8'),
@@ -56,12 +61,9 @@ function readCerts() {
  */
 const ticketStorage = new FileTicketStorage(config.afip.ticketsDir);
 
-function createAll(production?: boolean) {
+function credencialesDe(production?: boolean) {
   const { cert, key } = readCerts();
-  // Config común: todos los SDKs extienden ArcaBaseConfig de arca-common
-  // (cuit number|string validado con dígito verificador, ticketStorage,
-  // onEvent y legacyTls "auto" por defecto para la producción de WSFEv1/WSCDC).
-  const base: ArcaBaseConfig = {
+  return {
     cuit: config.afip.cuit,
     cert,
     key,
@@ -69,8 +71,24 @@ function createAll(production?: boolean) {
     ticketStorage,
     onEvent,
   };
+}
+
+function createAll(production?: boolean) {
+  const credenciales = credencialesDe(production);
+  // Un solo WsaaClient para los 7 SDKs (mismo certificado): comparte los
+  // tickets en memoria, el reloj de ARCA y las esperas tras un login fallido.
+  // Valida el certificado y la clave al construirse (ArcaValidationError).
+  const wsaa = createWsaaClient(credenciales, onEvent);
+
+  // Config común: todas las configs de los SDKs extienden ArcaSdkConfig de
+  // arca-common (cuit number|string validado con dígito verificador,
+  // ticketStorage, onEvent, `wsaa` compartido del mismo entorno y legacyTls
+  // "auto" por defecto para la producción de WSFEv1/WSCDC). Con `wsaa`, los
+  // SDKs ignoran cert/key/ticketStorage: se pasan igual porque son obligatorios.
+  const base: ArcaSdkConfig = { ...credenciales, wsaa };
 
   return {
+    wsaa,
     arca: new ArcaFacturacion(base),
     padron: new ArcaPadron(base),
     cdc: new ArcaCdc(base),
@@ -82,9 +100,10 @@ function createAll(production?: boolean) {
 }
 
 type Instances = ReturnType<typeof createAll>;
+type Sdk = Exclude<keyof Instances, 'wsaa'>;
 
-// Las instancias se crean al primer uso: los constructores validan el CUIT y
-// leen los certificados, y el server tiene que poder arrancar sin ellos (por
+// Las instancias se crean al primer uso: los constructores validan el CUIT, el
+// certificado y la clave, y el server tiene que poder arrancar sin ellos (por
 // ejemplo, para generar el certificado desde /api/afip/generate-cert).
 let _instances: Instances | null = null;
 let _production: boolean | undefined;
@@ -94,6 +113,31 @@ function instances(): Instances {
   return _instances;
 }
 
+/**
+ * Limpia las esperas de WSAA tras un login fallido (todas las de los servicios).
+ * Tras un error permanente (certificado vencido, `coe.notAuthorized`...) el
+ * WsaaClient no vuelve a pedir tickets hasta esto, `clearTicket` o un
+ * certificado nuevo (`reloadArca`). Devuelve false si todavía no se creó.
+ */
+export function resetWsaaCooldown(): boolean {
+  if (!_instances) return false;
+  _instances.wsaa.resetLoginCooldown();
+  return true;
+}
+
+/**
+ * Prueba el certificado instalado pidiendo un Ticket de Acceso de `wsfe` a WSAA
+ * con el WsaaClient del SDK, así el ticket queda en el mismo `ticketStorage`
+ * que usan los SDKs (un ticket obtenido por fuera haría que el próximo login
+ * del SDK falle con `ArcaTicketVigenteError` hasta que venza). Si el entorno
+ * pedido es el de los SDKs se usa su WsaaClient; si no, uno temporal.
+ */
+export async function probarCertificado(production: boolean) {
+  const actual = instances();
+  const wsaa = actual.wsaa.production === production ? actual.wsaa : createWsaaClient(credencialesDe(production), onEvent);
+  return wsaa.getAccessTicket('wsfe');
+}
+
 export function reloadArca(production?: boolean) {
   _instances = createAll(production);
   _production = production;
@@ -101,7 +145,7 @@ export function reloadArca(production?: boolean) {
   console.log(`[ARCA] Servicios recargados con los certificados nuevos (${env})`);
 }
 
-function proxy<K extends keyof Instances>(name: K): Instances[K] {
+function proxy<K extends Sdk>(name: K): Instances[K] {
   return new Proxy({} as Instances[K], {
     get(_target, prop) {
       const target = instances()[name] as any;

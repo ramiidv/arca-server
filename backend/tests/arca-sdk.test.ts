@@ -2,7 +2,7 @@ import { describe, it, expect } from 'vitest';
 import fs from 'fs';
 import path from 'path';
 import {
-  Arca,
+  ArcaFacturacion,
   IVA_RATES,
   IvaTipo,
   CbteTipo,
@@ -20,6 +20,9 @@ import {
   ArcaWSFEError,
   ArcaSoapError,
   ArcaResultadoIncierto,
+  ArcaConflictoExpo,
+  ArcaResponseError,
+  WSFE_ERRORES_AUTH,
   FileTicketStorage,
   armarComprobante,
   calcularTotales,
@@ -28,8 +31,10 @@ import {
   requiereRecuperacion,
 } from '@ramiidv/arca-facturacion';
 import type { FacturaResult } from '@ramiidv/arca-facturacion';
-import { formatDate } from '@ramiidv/arca-common';
+import { formatDate, createWsaaClient } from '@ramiidv/arca-common';
+import { testCert } from '@ramiidv/arca-common/testing';
 import { ArcaPadron, ArcaPadronServiceError } from '@ramiidv/arca-padron';
+import { ArcaCdc } from '@ramiidv/arca-cdc';
 import { ArcaEmpleados } from '@ramiidv/arca-empleados';
 
 // CUIT de ejemplo con dígito verificador válido (los SDKs lo validan).
@@ -81,6 +86,11 @@ describe('arca-facturacion: constantes y enums', () => {
     expect(Moneda.DOLARES).toBe('DOL');
   });
 
+  it('Moneda: 029 es guaraní y 031 peso boliviano (corregido en 6.1)', () => {
+    expect(Moneda.GUARANIES).toBe('029');
+    expect(Moneda.BOLIVIANOS).toBe('031');
+  });
+
   it('NOTA_CREDITO_MAP mapea facturas a sus NC correspondientes', () => {
     expect(NOTA_CREDITO_MAP[CbteTipo.FACTURA_A]).toBe(CbteTipo.NOTA_CREDITO_A);
     expect(NOTA_CREDITO_MAP[CbteTipo.FACTURA_B]).toBe(CbteTipo.NOTA_CREDITO_B);
@@ -103,7 +113,7 @@ describe('arca-facturacion: constantes y enums', () => {
   });
 });
 
-describe('arca-common: formatDate() (reemplaza a Arca.formatDate, deprecado)', () => {
+describe('arca-common: formatDate() (reemplaza a Arca.formatDate, quitado en facturacion 6)', () => {
   it('formatea Date a YYYYMMDD con la fecha calendario de Argentina', () => {
     expect(formatDate(new Date('2026-06-15T12:00:00-03:00'))).toBe('20260615');
     // 01:00 UTC del 1/1 es todavía 31/12 en Argentina
@@ -121,8 +131,9 @@ describe('arca-common: formatDate() (reemplaza a Arca.formatDate, deprecado)', (
     expect(() => formatDate('2026-03-15T10:00:00Z')).toThrow(ArcaValidationError);
   });
 
-  it('Arca.formatDate sigue disponible (deprecado) y delega en common', () => {
-    expect(Arca.formatDate('2026-03-15')).toBe('20260315');
+  it('ArcaFacturacion ya no expone formatDate/calcularTotales estáticos', () => {
+    expect((ArcaFacturacion as unknown as Record<string, unknown>).formatDate).toBeUndefined();
+    expect((ArcaFacturacion as unknown as Record<string, unknown>).calcularTotales).toBeUndefined();
   });
 });
 
@@ -150,8 +161,8 @@ describe('arca-facturacion: QR (generarUrlQR / urlQRDesdeFactura)', () => {
     expect(p).not.toHaveProperty('tipoDocRec');
   });
 
-  it('Arca.generateQRUrl acepta baseUrl', () => {
-    const url = Arca.generateQRUrl(base, { baseUrl: 'https://www.afip.gob.ar/fe/qr/' });
+  it('ArcaFacturacion.generateQRUrl acepta baseUrl', () => {
+    const url = ArcaFacturacion.generateQRUrl(base, { baseUrl: 'https://www.afip.gob.ar/fe/qr/' });
     expect(url.startsWith('https://www.afip.gob.ar/fe/qr/?p=')).toBe(true);
   });
 
@@ -194,7 +205,7 @@ describe('arca-facturacion: calcularTotales()', () => {
     const { importes, iva } = calcularTotales([{ neto: 1000, iva: IvaTipo.IVA_21 }]);
 
     expect(importes).toMatchObject({ neto: 1000, iva: 210, total: 1210, exento: 0, noGravado: 0, tributos: 0 });
-    expect(iva).toEqual([{ Id: IvaTipo.IVA_21, BaseImp: 1000, Importe: 210 }]);
+    expect(iva).toEqual([{ id: IvaTipo.IVA_21, baseImp: 1000, importe: 210 }]);
   });
 
   it('calcula totales con múltiples alícuotas', () => {
@@ -217,7 +228,7 @@ describe('arca-facturacion: calcularTotales()', () => {
 
     expect(importes.neto).toBe(1000);
     expect(importes.iva).toBe(210);
-    expect(iva).toEqual([{ Id: IvaTipo.IVA_21, BaseImp: 1000, Importe: 210 }]);
+    expect(iva).toEqual([{ id: IvaTipo.IVA_21, baseImp: 1000, importe: 210 }]);
   });
 
   it('mezcla gravados, exentos y no gravados', () => {
@@ -253,7 +264,7 @@ describe('arca-facturacion: calcularTotales()', () => {
 
   it('incluye tributos en el total', () => {
     const { importes } = calcularTotales([{ neto: 1000, iva: IvaTipo.IVA_21 }], {
-      tributos: [{ Importe: 50 }, { Importe: 30 }],
+      tributos: [{ importe: 50 }, { importe: 30 }],
     });
 
     expect(importes.tributos).toBe(80);
@@ -281,9 +292,48 @@ describe('arca-facturacion: armarComprobante() y resultado incierto', () => {
       fecha: '20261101',
     });
     expect(importes.total).toBe(1210);
-    expect(request.CbteDesde).toBe(151);
-    // Consumidor final sin identificar: el SDK completa CondicionIVAReceptorId
-    expect(request.CondicionIVAReceptorId).toBe(CondicionIva.CONSUMIDOR_FINAL);
+    expect(request.cbteDesde).toBe(151);
+    // Consumidor final sin identificar: el SDK completa condicionIvaReceptorId = 5
+    expect(request.condicionIvaReceptorId).toBe(CondicionIva.CONSUMIDOR_FINAL);
+  });
+
+  it('clase A exige receptor con CUIT (docTipo 80, validación 10013)', () => {
+    expect(() =>
+      armarComprobante({
+        ptoVta: 1,
+        cbteTipo: CbteTipo.FACTURA_A,
+        cbteNro: 1,
+        docTipo: DocTipo.DNI,
+        docNro: 12345678,
+        condicionIva: CondicionIva.RESPONSABLE_INSCRIPTO,
+        items: [{ neto: 100, iva: IvaTipo.IVA_21 }],
+      }),
+    ).toThrow(ArcaValidationError);
+  });
+
+  it('NC/ND sin comprobantes ni período asociado es inválida (validación 10197)', () => {
+    expect(() =>
+      armarComprobante({
+        ptoVta: 1,
+        cbteTipo: CbteTipo.NOTA_CREDITO_B,
+        cbteNro: 1,
+        items: [{ neto: 100, iva: IvaTipo.IVA_21 }],
+      }),
+    ).toThrow(ArcaValidationError);
+  });
+
+  it('servicios: vtoPago se puede indicar fuera de servicio (6.1)', () => {
+    const { request } = armarComprobante({
+      ptoVta: 1,
+      cbteTipo: CbteTipo.FACTURA_B,
+      cbteNro: 1,
+      fecha: '20261101',
+      concepto: Concepto.SERVICIOS,
+      servicio: { desde: '20261001', hasta: '20261031' },
+      vtoPago: '20261110',
+      items: [{ neto: 100, iva: IvaTipo.IVA_21 }],
+    });
+    expect(request.fchVtoPago).toBe('20261110');
   });
 
   it('exige condicionIva si el receptor está identificado (RG 5616)', () => {
@@ -359,6 +409,28 @@ describe('arca-facturacion: clases de error', () => {
     expect(new ArcaSoapError('network error').uncertain).toBe(false);
   });
 
+  it('WSFE_ERRORES_AUTH: 600/601 llegan como ArcaAuthError (6.1)', () => {
+    expect([...WSFE_ERRORES_AUTH]).toEqual([600, 601]);
+  });
+
+  it('ArcaResponseError (de arca-common) se reexporta y no es ArcaSoapError', () => {
+    const err = new ArcaResponseError('falta Resultado', true);
+    expect(err).toBeInstanceOf(ArcaError);
+    expect(err).not.toBeInstanceOf(ArcaSoapError);
+    expect(err.uncertain).toBe(true);
+  });
+
+  it('ArcaConflictoExpo extiende ArcaError (no es incierto)', () => {
+    expect(ArcaConflictoExpo.code).toBe('ARCA_CONFLICTO_EXPO');
+  });
+
+  it('ArcaAuthError tiene faultCode y retryable (default false)', () => {
+    const err = new ArcaAuthError('x', { faultCode: 'ns1:cms.cert.expired' });
+    expect(err.faultCode).toBe('ns1:cms.cert.expired');
+    expect(err.retryable).toBe(false);
+    expect(new ArcaAuthError('y', { retryable: true }).retryable).toBe(true);
+  });
+
   it('ArcaPadronServiceError extiende ArcaServiceError con reason', () => {
     const err = new ArcaPadronServiceError('x', [{ code: 0, msg: 'No existe persona con ese Id' }], { reason: 'inexistente' });
     expect(err).toBeInstanceOf(ArcaServiceError);
@@ -367,14 +439,33 @@ describe('arca-facturacion: clases de error', () => {
 });
 
 describe('arca-padron / arca-facturacion: config', () => {
+  const certs = testCert();
+
   it('los constructores validan el CUIT (dígito verificador)', () => {
-    expect(() => new Arca({ cuit: 20123456789, cert: 'x', key: 'y' })).toThrow(ArcaValidationError);
-    expect(() => new ArcaPadron({ cuit: '20-12345678-9', cert: 'x', key: 'y' })).toThrow(ArcaValidationError);
+    expect(() => new ArcaFacturacion({ cuit: 20123456789, ...certs })).toThrow(ArcaValidationError);
+    expect(() => new ArcaPadron({ cuit: '20-12345678-9', ...certs })).toThrow(ArcaValidationError);
   });
 
   it('aceptan el CUIT como número o string', () => {
-    expect(() => new Arca({ cuit: '20-12345678-6', cert: 'x', key: 'y' })).not.toThrow();
-    expect(() => new ArcaPadron({ cuit: CUIT, cert: 'x', key: 'y' })).not.toThrow();
+    expect(() => new ArcaFacturacion({ cuit: '20-12345678-6', ...certs })).not.toThrow();
+    expect(() => new ArcaPadron({ cuit: CUIT, ...certs })).not.toThrow();
+  });
+
+  it('el certificado y la clave se validan al construir (arca-common 0.7)', () => {
+    expect(() => new ArcaFacturacion({ cuit: CUIT, cert: 'x', key: 'y' })).toThrow(ArcaValidationError);
+  });
+
+  it('un WsaaClient compartido sirve a todos los SDKs del mismo entorno', () => {
+    const wsaa = createWsaaClient({ cuit: CUIT, ...certs, production: false });
+    const arca = new ArcaFacturacion({ cuit: CUIT, ...certs, wsaa });
+    const cdc = new ArcaCdc({ cuit: CUIT, ...certs, wsaa });
+    expect(arca.wsaa).toBe(wsaa);
+    expect(cdc.wsaa).toBe(wsaa);
+  });
+
+  it('rechaza un wsaa compartido de otro entorno', () => {
+    const wsaa = createWsaaClient({ cuit: CUIT, ...certs, production: true });
+    expect(() => new ArcaPadron({ cuit: CUIT, ...certs, production: false, wsaa })).toThrow(ArcaValidationError);
   });
 });
 
@@ -382,7 +473,8 @@ describe('arca-empleados: archivo de ancho fijo', () => {
   it('genera registros de 130 posiciones con resumen y buffer latin1', () => {
     const sr = new ArcaEmpleados();
     sr.alta({ cuil: '20-12345678-6', fechaInicio: '2026-11-02', modalidadContrato: 8, obraSocial: '126205', sucursal: 1 })
-      .baja({ cuil: '20123456786', fechaFin: '2026-10-31' });
+      // fechaInicio (inicio del vínculo) es obligatoria en todos los movimientos desde 0.5
+      .baja({ cuil: '20123456786', fechaInicio: '2020-03-01', fechaFin: '2026-10-31' });
     const { contenido, lineas, encoding, buffer, resumen } = sr.generar();
 
     expect(lineas).toHaveLength(2);
@@ -392,6 +484,13 @@ describe('arca-empleados: archivo de ancho fijo', () => {
     expect(encoding).toBe('latin1');
     expect(buffer.toString('latin1')).toBe(contenido);
     expect(resumen).toMatchObject({ totalRegistros: 2, altas: 1, bajas: 1 });
+  });
+
+  it('rechaza propiedades que no son del diseño de registro (0.5)', () => {
+    const sr = new ArcaEmpleados();
+    expect(() =>
+      sr.alta({ cuil: '20123456786', fechaInicio: '2026-11-02', modalidadContrato: 8, obraSocal: '126205' } as never),
+    ).toThrow(ArcaValidationError);
   });
 });
 
@@ -411,7 +510,7 @@ const canRunIntegration =
 
 describe.skipIf(!canRunIntegration)('arca-facturacion: integración con ARCA homologación', () => {
   const crear = () =>
-    new Arca({
+    new ArcaFacturacion({
       cuit: integrationCuit!,
       cert: fs.readFileSync(certPath, 'utf8'),
       key: fs.readFileSync(keyPath, 'utf8'),
@@ -419,30 +518,31 @@ describe.skipIf(!canRunIntegration)('arca-facturacion: integración con ARCA hom
       // Persistir el TA: sin esto, correr los tests dos veces seguidas da ArcaTicketVigenteError
       ticketStorage: new FileTicketStorage(path.resolve(__dirname, '../certs/tickets')),
     });
-  const arca = canRunIntegration ? crear() : (undefined as unknown as Arca);
+  const arca = canRunIntegration ? crear() : (undefined as unknown as ArcaFacturacion);
 
-  it('serverStatus responde OK', async () => {
-    const status = await arca.serverStatus();
-    expect(status.AppServer).toBeDefined();
-    expect(status.DbServer).toBeDefined();
-    expect(status.AuthServer).toBeDefined();
+  it('status() responde con wsfe y wsfex', async () => {
+    const { wsfe, wsfex } = await arca.status();
+    expect(wsfe.status?.appserver).toBeDefined();
+    expect(wsfe.status?.dbserver).toBeDefined();
+    expect(wsfe.status?.authserver).toBeDefined();
+    expect(wsfex).toHaveProperty('ok');
   });
 
   it('getTiposDocumento incluye CUIT', async () => {
     const tipos = await arca.getTiposDocumento();
-    expect(tipos.find((t) => t.Id === DocTipo.CUIT)).toBeDefined();
+    expect(tipos.find((t) => t.id === DocTipo.CUIT)).toBeDefined();
   });
 
   it('getMonedas devuelve lista con PES', async () => {
     const monedas = await arca.getMonedas();
-    expect(monedas.find((m) => m.Id === Moneda.PESOS)).toBeDefined();
+    expect(monedas.find((m) => m.id === Moneda.PESOS)).toBeDefined();
   });
 
-  it('getCotizacion devuelve ResultGet', async () => {
+  it('getCotizacion devuelve { monId, monCotiz, fchCotiz }', async () => {
     const cotiz = await arca.getCotizacion(Moneda.DOLARES);
-    expect(cotiz.MonId).toBe(Moneda.DOLARES);
-    expect(typeof cotiz.MonCotiz).toBe('number');
-    expect(cotiz.FchCotiz).toMatch(/^\d{8}$/);
+    expect(cotiz.monId).toBe(Moneda.DOLARES);
+    expect(typeof cotiz.monCotiz).toBe('number');
+    expect(cotiz.fchCotiz).toMatch(/^\d{8}$/);
   });
 
   it('getPuntosVenta devuelve lista', async () => {
@@ -476,7 +576,7 @@ describe.skipIf(!canRunIntegration)('arca-facturacion: integración con ARCA hom
   it('consultarComprobante recupera la última factura', async () => {
     const ultimo = await arca.ultimoComprobante(1, CbteTipo.FACTURA_B);
     const consulta = await arca.consultarComprobante(CbteTipo.FACTURA_B, 1, ultimo);
-    expect(consulta.ResultGet.Resultado).toBe('A');
+    expect(consulta.resultGet.resultado).toBe('A');
   });
 
   it('notaCredito asociada a un comprobante', async () => {
@@ -497,8 +597,8 @@ describe.skipIf(!canRunIntegration)('arca-facturacion: integración con ARCA hom
     expect(nc.cbteTipo).toBe(CbteTipo.NOTA_CREDITO_B);
   });
 
-  it('serverStatusExpo responde OK', async () => {
-    const status = await arca.serverStatusExpo();
-    expect(status.AppServer).toBeDefined();
+  it('status().wsfex responde', async () => {
+    const { wsfex } = await arca.status();
+    expect(wsfex.ok || wsfex.error).toBeTruthy();
   });
 });

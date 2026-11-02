@@ -6,15 +6,15 @@ ARCA Server is a full-stack Argentine electronic invoicing system (facturación 
 ## Architecture
 - **Backend:** Express 5.2 (TypeScript 6), Prisma 7 (PostgreSQL, driver adapter @prisma/adapter-pg), Zod 4, arca-cert
 - **Frontend:** React 19.2, Vite 8, Tailwind CSS 4 (@tailwindcss/vite, no postcss.config), React Hook Form 7
-- **Facturación:** @ramiidv/arca-facturacion ^5.0.0 (`ArcaFacturacion`; ESM-only, loaded via require(esm), Node >= 20.19) — WSFEv1, WSFEX, CAEA, QR, uncertain-result recovery
-- **Padrón:** @ramiidv/arca-padron ^0.5.0 — A4 (full), A10 (basic), A13, A100, constancia; typed ArcaPadronServiceError; condicionIvaDesdePadron
-- **Constatación:** @ramiidv/arca-cdc ^0.4.0 — WSCDC verify comprobantes (CbteModo + CuitEmisor required)
-- **FECRED:** @ramiidv/arca-fecred ^0.4.0 — Factura de Crédito Electrónica MiPyME (WSFECRED)
-- **MTXCA:** @ramiidv/arca-mtxca ^0.4.0 — Facturación con detalle de artículos (WSMTXCA, XSD field names)
-- **SIRE:** @ramiidv/arca-sire ^0.4.0 — IVA retention certificates C2005 (emitirCertificado, anularCertificado, status only)
-- **Agro:** @ramiidv/arca-agro ^0.4.0 — Carta de Porte (WSCPE), Liquidaciones (WSLPG). WSCTG was removed (repealed by RG 5017/2021)
-- **Empleados:** @ramiidv/arca-empleados ^0.4.0 — "Ingreso masivo de relaciones laborales" fixed-width TXT (130 positions, ISO-8859-1). Not F935
-- **Common:** @ramiidv/arca-common ^0.5.0 — shared WSAA, FileTicketStorage, SOAP client with legacy TLS fallback, strict formatDate, validators
+- **Facturación:** @ramiidv/arca-facturacion ^6.1.0 (`ArcaFacturacion`; ESM-only, loaded via require(esm), Node >= 20.19) — WSFEv1, WSFEX, CAEA, QR, uncertain-result recovery. Whole API camelCase since 6.0
+- **Padrón:** @ramiidv/arca-padron ^0.7.0 — A4 (full), A10 (basic), A13, A100, constancia; typed ArcaPadronServiceError; condicionIvaDesdePadron; `metadata` on personas
+- **Constatación:** @ramiidv/arca-cdc ^0.6.0 — WSCDC verify comprobantes, camelCase (cbteModo + cuitEmisor required)
+- **FECRED:** @ramiidv/arca-fecred ^0.6.0 — Factura de Crédito Electrónica MiPyME (WSFECRED); open enums in responses
+- **MTXCA:** @ramiidv/arca-mtxca ^0.6.0 — Facturación con detalle de artículos (WSMTXCA, XSD field names, condicionIVAReceptor required, half-even rounding, urlQR)
+- **SIRE:** @ramiidv/arca-sire ^0.5.0 — IVA retention certificates C2005 (emitirCertificado, anularCertificado, status with headerInfo)
+- **Agro:** @ramiidv/arca-agro ^0.6.0 — Carta de Porte (WSCPE), Liquidaciones (WSLPG). WSCTG was removed (repealed by RG 5017/2021)
+- **Empleados:** @ramiidv/arca-empleados ^0.5.0 — "Ingreso masivo de relaciones laborales" fixed-width TXT (130 positions, ISO-8859-1). Not F935
+- **Common:** @ramiidv/arca-common ^0.7.0 — WSAA (one `WsaaClient` shared by all SDKs here), FileTicketStorage, SOAP client with legacy TLS fallback, strict formatDate, validators
 - **Certificates:** arca-cert handles automated AFIP certificate generation/renewal via portal login
 
 ## Key Files
@@ -22,23 +22,23 @@ ARCA Server is a full-stack Argentine electronic invoicing system (facturación 
 ### Backend
 - `backend/src/index.ts` — Express app with Helmet (CSP, HSTS, frame-ancestors:none), CORS, rate limiting (200/15min global, 20/15min auth), body limit 1MB
 - `backend/src/config/index.ts` — Environment config. JWT_SECRET and DATABASE_URL are required (no defaults, throws on missing). `afip.ticketsDir` (AFIP_TICKETS_DIR, default backend/certs/tickets), `afip.recoveryDelayMs` (AFIP_RECOVERY_DELAY_MS, default 3000)
-- `backend/src/services/arca.service.ts` — All 7 service instances (Arca, ArcaPadron, ArcaCdc, ArcaFecred, ArcaMtxca, ArcaSire, ArcaAgro) built lazily on first use from one shared ArcaBaseConfig (cuit, cert, key, production, a shared `FileTicketStorage(AFIP_TICKETS_DIR)` and `onEvent`). The Proxy binds methods to the real instance (SDKs use #private fields). ArcaEmpleados is stateless (no SOAP). `reloadArca(production?)` recreates all instances
-- `backend/src/services/invoice.service.ts` — createInvoice / createNotaCredito / createNotaDebito share `emitir()`: reserve number (ultimoComprobante + 1) and date (formatDate(arca.wsaa.now())), `armarComprobante` → intento, persist Invoice with resultado "P" + `emision` JSON BEFORE sending, then facturar/notaCredito/notaDebito. Uncertain → recuperarComprobante (autorizado → "A"; no_emitido → resend once with same cbteNro+fecha; conflicto → "C"; otherwise stays "P"). `recuperarFactura(id)` retries recovery. Per-(ptoVta,cbteTipo) in-process lock; new emissions blocked (409) while one is pending. QR via `arca.urlQR(result)`. condicionIva from body or client (RG 5616)
+- `backend/src/services/arca.service.ts` — All 7 service instances (ArcaFacturacion, ArcaPadron, ArcaCdc, ArcaFecred, ArcaMtxca, ArcaSire, ArcaAgro) built lazily on first use from one `ArcaSdkConfig` (cuit, cert, key, production, `FileTicketStorage(AFIP_TICKETS_DIR)`, `onEvent`) plus ONE shared `WsaaClient` (`createWsaaClient` from arca-common, passed as `wsaa`). WsaaClient validates cert/key at construction (ArcaValidationError); missing cert files → AppError 503, so the server still boots without certs. The Proxy binds methods to the real instance (SDKs use #private fields). ArcaEmpleados is stateless (no SOAP). `reloadArca(production?)` recreates all instances (new WsaaClient, clears login cooldowns); `resetWsaaCooldown()` calls `wsaa.resetLoginCooldown()`
+- `backend/src/services/invoice.service.ts` — createInvoice / createNotaCredito / createNotaDebito share `emitir()`: reserve number (ultimoComprobante + 1) and date (formatDate(arca.wsaa.now())), `armarComprobante` → intento, persist Invoice with resultado "P" + `emision` JSON BEFORE sending, then facturar/notaCredito/notaDebito. Uncertain → recuperarComprobante (autorizado → "A"; no_emitido → resend once with same cbteNro+fecha; conflicto → "C" with `emision.encontrado` in camelCase; otherwise stays "P"). On resend, ArcaWSFEError (except 6xx) → deleted/422; ArcaAuthError (incl. WSFE 600/601 since 6.1), 602, network → stays "P". `recuperarFactura(id)` retries recovery. Per-(ptoVta,cbteTipo) in-process lock; new emissions blocked (409) while one is pending. QR via `arca.urlQR(result)`. condicionIva from body or client (RG 5616); with docTipo 99 left undefined so the SDK sends 5
 - `backend/src/lib/prisma.ts` — Single shared Prisma 7 client with PrismaPg driver adapter
 - `backend/src/middleware/auth.ts` — JWT Bearer + API key (SHA-256 hashed, looked up by hash). API keys authenticated via X-API-Key header
-- `backend/src/middleware/errorHandler.ts` — instanceof checks ordered most-specific first: AppError, Prisma, ArcaValidationError (400 + field/details), ArcaResultadoInciertoExpo / ArcaResultadoIncierto (502, uncertain: true, recuperacion), ArcaTicketVigenteError (503) before ArcaAuthError (503), ArcaPadronServiceError (reason: inexistente 404, inactiva 422, id_invalido 400, no_autorizado 502) and ArcaWSFEError (422) before ArcaServiceError (422 + errors), ArcaSoapError (502/504 with faultCode/faultString/uncertain/upstreamStatus; parseSoapFault fallback), ArcaAgroResponseError, ArcaPadronError (502), ArcaSerializationError (400), ArcaError (400), ArcaCertError, ZodError
-- `backend/src/routes/afip.ts` — AFIP params, cert management (4), padrón (3), CDC (3), FECRED (5), MTXCA (3), SIRE (sire-status, sire-emitir + alias sire-retencion, POST sire-anular), Agro (agro-status, agro-cpe-autorizar, agro-lpg-autorizar), Empleados (empleados-generar, ?formato=txt download), comprobante, cotizacion, puntos-venta, last-voucher, status. Route/query params validated in the route; bodies validated by the SDKs (ArcaValidationError)
+- `backend/src/middleware/errorHandler.ts` — instanceof checks ordered most-specific first: AppError, Prisma, ArcaValidationError (400 + field/details), ArcaResultadoInciertoExpo / ArcaResultadoIncierto (502, uncertain: true, recuperacion), ArcaConflictoExpo (409, details { id, enviado, respuesta }), ArcaTicketVigenteError (503) before ArcaAuthError (503 + retryable, faultCode, blocked = permanent WSAA error cms./coe./xml./wsn. → use POST /afip/wsaa-reset; message differs for WSFE 600/601 ticket rejection), ArcaPadronServiceError (reason: inexistente 404, inactiva 422, id_invalido 400, no_autorizado 502) and ArcaWSFEError (422) and ArcaAgroServiceError with uncertain (502) before ArcaServiceError (422 + errors), ArcaSoapError (502/504 with faultCode/faultString/uncertain/upstreamStatus; parseSoapFault fallback; responseBody/faultDetail never exposed), ArcaResponseError incl. ArcaAgroResponseError (502 + uncertain), ArcaPadronError (502), ArcaSerializationError (400), ArcaError (400), ArcaCertError, ZodError
+- `backend/src/routes/afip.ts` — AFIP params, cert management (4), padrón (3), CDC (3), FECRED (5), MTXCA (3), SIRE (sire-status, sire-emitir + alias sire-retencion, POST sire-anular), Agro (agro-status, agro-cpe-autorizar, agro-lpg-autorizar), Empleados (empleados-generar, ?formato=txt download, fechaReferencia), comprobante, cotizacion, puntos-venta, last-voucher, status ({ wsfe, wsfex }), wsaa-reset. All responses use the SDKs' camelCase names. Route/query params validated in the route; bodies validated by the SDKs (ArcaValidationError)
 - `backend/src/routes/invoices.ts` — POST / (create), POST /nota-credito, POST /nota-debito (201 approved, 202 pending/conflict), POST /:id/recuperar, GET / (filters: cbteTipo, clientId, resultado, from, to), GET /stats, GET /:id
 - `backend/src/routes/auth.ts` — register (first user = admin), login (JWT), me, api-keys CRUD (max 5 per user, SHA-256 hashed, keyHint for display)
 - `backend/src/routes/clients.ts` — CRUD with search by name/docNumber, delete protection (fails if client has invoices)
 - `backend/prisma/schema.prisma` — User, ApiKey (key=hash, keyHint=mask), Client, Invoice (qrUrl, resultado A/P/C, emision Json, monId, monCotiz), InvoiceItem. Migration `20261101120000_add_invoice_emision`
 - `backend/prisma.config.ts` — Prisma 7 config (@ts-nocheck, executed by Prisma CLI not tsc)
-- `backend/tests/` — arca-sdk.test.ts (SDK API + integration gated by ARCA_INTEGRATION=1), errorHandler.test.ts, invoice.service.test.ts (uncertain → recover, mocked SDK + in-memory Prisma), afip-empleados.route.test.ts (?formato=txt)
+- `backend/tests/` — arca-sdk.test.ts (SDK API + integration gated by ARCA_INTEGRATION=1), afip-routes.e2e.test.ts (real arca.service + SDKs, ARCA mocked with mockFetchWith from @ramiidv/arca-common/testing), arca-service.test.ts (boot without certs), errorHandler.test.ts, invoice.service.test.ts (uncertain → recover, mocked SDK + in-memory Prisma), afip-empleados.route.test.ts (?formato=txt)
 - `backend/vitest.config.ts` — 60s test timeout
 
 ### Frontend
 - `frontend/src/App.tsx` — 14 routes (2 public: login/register, 12 protected)
-- `frontend/src/api/client.ts` — Axios client with 30s timeout (120s for emissions/recovery), auto Bearer token, auto-logout on 401. Functions unwrap the backend `{ success, data }` envelope and map paginated lists to `{ invoices|clients, total, page, totalPages }`. Includes recuperarFactura, constatarComprobante (CbteModo, CuitEmisor), getCotizacion (ResultGet), FECRED (idCtaCte), SIRE (emitirCertificadoSire, anularCertificadoSire), generarArchivoEmpleados / descargarArchivoEmpleados
+- `frontend/src/api/client.ts` — Axios client with 30s timeout (120s for emissions/recovery), auto Bearer token, auto-logout on 401. Functions unwrap the backend `{ success, data }` envelope and map paginated lists to `{ invoices|clients, total, page, totalPages }`. Includes recuperarFactura, constatarComprobante (camelCase ConstatarInput: cbteModo, cuitEmisor...), getCotizacion ({ monId, monCotiz, fchCotiz }), getAfipStatus ({ wsfe, wsfex }), resetWsaa, FECRED (idCtaCte), SIRE (emitirCertificadoSire, anularCertificadoSire), generarArchivoEmpleados / descargarArchivoEmpleados
 - `frontend/src/utils/errors.ts` — getApiErrorMessage() extracts err.response.data.error over axios err.message, appends soapFault if present
 - `frontend/src/utils/formatters.ts` — formatCurrency (ARS), formatDate (YYYYMMDD → DD/MM/YYYY), formatCbteTipo, formatFullInvoiceNumber, formatDocType
 - `frontend/src/components/Layout.tsx` — Sticky header with glassmorphism blur, skip-to-content link, user menu with avatar initial
@@ -49,53 +49,64 @@ ARCA Server is a full-stack Argentine electronic invoicing system (facturación 
 - `frontend/src/pages/NewInvoice.tsx` — Type-aware form: Factura A (forces CUIT, shows alert), Factura B (all doc types), Factura C (hides IVA selector, no IVA in totals). Dynamic punto de venta from getPuntosVenta(). Service dates only shown for concepto 2/3
 - `frontend/src/pages/NewNotaCredDeb.tsx` — NC/ND tabs, invoice search, type auto-inferred from original. Linked from InvoiceDetail with ?facturaId=
 - `frontend/src/pages/NewClient.tsx` — CUIT lookup button (consultarCuit) auto-fills name, address, IVA condition from AFIP padrón A13
-- `frontend/src/pages/ConsultaComprobante.tsx` — Query comprobante in AFIP by PV + type + number (importes, CAE, dates, observaciones) and constatación form (WSCDC: CbteModo, CuitEmisor, ...), prefillable from the queried comprobante
-- `frontend/src/pages/AfipParams.tsx` — 6 tabs (comprobantes, documentos, iva, conceptos, monedas, tributos), lazy-loaded, monedas tab has cotización lookup
-- `frontend/src/pages/Settings.tsx` — Cert status (expiry, days left, color-coded), generate/renew tabs, verify cert against WSAA, AFIP server status, app info. Production as default environment
+- `frontend/src/pages/ConsultaComprobante.tsx` — Query comprobante in AFIP by PV + type + number (camelCase resultGet: importes, CAE/CAEA, dates, observaciones) and constatación form (WSCDC: cbteModo, cuitEmisor, ...), prefillable from the queried comprobante
+- `frontend/src/pages/AfipParams.tsx` — 7 tabs (comprobantes, documentos, iva, cond. IVA, conceptos, monedas, tributos), lazy-loaded, items `{ id, desc, fchDesde?, fchHasta? }`, monedas tab has cotización lookup
+- `frontend/src/pages/Settings.tsx` — Cert status (expiry, days left, color-coded), generate/renew tabs, verify cert against WSAA, WSFEv1/WSFEX status (appserver/dbserver/authserver), "Reintentar autenticación" (POST /afip/wsaa-reset), app info. Production as default environment
 - `frontend/src/main.tsx` — Toaster with custom render: dismiss button (✕) on every toast, error toasts last 10s, success 5s
 - `frontend/src/index.css` — @import "tailwindcss", @utility directives (btn-primary/secondary/danger, card, input, label, select, table-header/cell, stat-card, empty-state, badge-green/red/yellow, skip-link). Touch targets 44px for pointer:coarse, touch-manipulation, prefers-reduced-motion, focus-visible, print styles, custom scrollbar
-- `frontend/src/types/index.ts` — Invoice (with qrUrl), Client, InvoiceItem, InvoiceStats, CBTE_TIPOS, DOC_TIPOS, IVA_ALICUOTAS, IVA_CONDITIONS constants
+- `frontend/src/types/index.ts` — Invoice (with qrUrl), Client, InvoiceItem, InvoiceStats; ARCA types in the SDKs' camelCase (ParamAfip, PuntoVenta, Cotizacion, UltimoComprobante, ComprobanteAfip, ConstatarInput/Result, ServerStatus, ServicioStatus, ArcaStatus); CBTE_TIPOS, DOC_TIPOS, IVA_ALICUOTAS, IVA_CONDITIONS constants
 
 ## AFIP Integration (modular packages)
 
-### @ramiidv/arca-common ^0.5.0
-- **WSAA** with `ticketStorage` (this project: one shared `FileTicketStorage` at AFIP_TICKETS_DIR). Without it every restart ends in `ArcaTicketVigenteError` until the old TA expires (up to 12h)
+### @ramiidv/arca-common ^0.7.0
+- **WSAA** with `ticketStorage` (this project: one shared `FileTicketStorage` at AFIP_TICKETS_DIR and one shared `WsaaClient`). Without storage every restart ends in `ArcaTicketVigenteError` until the old TA expires (up to 12h)
+- WsaaClient validates cert/key at construction (ArcaValidationError). After a non-retryable login error (`cms.*`, `coe.notAuthorized`, `xml.*`, `wsn.*` except `wsn.unavailable`) the service is blocked until `resetLoginCooldown(service?)`, `clearTicket` or `clearAllTickets` (`permanentErrorCooldownMs`, default Infinity); transient errors keep the 60s `loginErrorCooldownMs`
+- `ArcaSdkBase` (all SDK main classes) rejects a shared `wsaa` from another environment; all SDK configs extend `ArcaSdkConfig` (= `ArcaBaseConfig` + `wsaa`, `signal`, `endpoints.wsaa`)
+- `status()`/`statusOf` → `ServiceStatus` = `{ ok: true, status } | { ok: false, error, status? }`; `ok` is false if any server is not `OK`
 - SOAP transport with legacy TLS fallback (`legacyTls: "auto"`): production WSFEv1/WSCDC (servicios1.afip.gov.ar, 1024-bit DH) fail on Node >= 17 without it
-- `formatDate` is strict: only `Date`, `YYYYMMDD` or `YYYY-MM-DD` (existing dates); `Date` uses the Argentina calendar date
-- Errors: ArcaError > ArcaAuthError > ArcaTicketVigenteError; ArcaSoapError (statusCode, faultCode, faultString, uncertain, aborted); ArcaServiceError (errors[]); ArcaValidationError (field, details). `instanceof` works across package copies (code-based)
+- `formatDate` is strict: only `Date`, `YYYYMMDD` or `YYYY-MM-DD` (existing dates); `Date` uses the Argentina calendar date. `parseAfipDate`/`afipSoapCall` are deprecated aliases (use `parseArcaDate`/`arcaSoapCall`; not used here)
+- Errors: ArcaError > ArcaAuthError (faultCode, statusCode, retryable) > ArcaTicketVigenteError; ArcaSoapError (statusCode, faultCode, faultString, uncertain, aborted, responseBody, faultDetail); ArcaServiceError (errors[]); ArcaValidationError (field, details); ArcaResponseError (uncertain). `instanceof` works across package copies (code-based)
 
-### @ramiidv/arca-facturacion ^5.0.0
-- **WSFEv1** — facturar / notaCredito / notaDebito (never retried), armarComprobante (pure, returns request/importes/intento), recuperarComprobante(intento) → autorizado | no_emitido | conflicto, requiereRecuperacion (10016 by number)
-- `ArcaResultadoIncierto` (intento, intentos, operacion) when an emission has no reliable result; `ArcaResultadoInciertoExpo` for WSFEX (resend same Id)
-- `condicionIva` required when docTipo != 99 (RG 5616)
+### @ramiidv/arca-facturacion ^6.1.0
+- `Arca` → `ArcaFacturacion`; removed `serverStatus()`/`serverStatusExpo()` (use `status()` → `{ wsfe, wsfex }` ServiceStatus), `extractCAE`, static `formatDate`/`calcularTotales`, `toDateString`
+- **camelCase everywhere**: `consultarComprobante` → `{ resultGet: { cbteFch?, impTotal, impIva, docTipo, docNro, codAutorizacion?, resultado?, emisionTipo?, iva?[], tributos?[], cbtesAsoc?[], opcionales?[], observaciones?[] }, events? }` (lists are plain arrays; many fields optional since 6.1); param tables `{ id, desc, fchDesde?, fchHasta? }` (condiciones IVA `{ id, desc, cmpClase? }`), puntos de venta `{ nro, emisionTipo?, bloqueado?, fchBaja? }`, `getCotizacion` → `{ monId, monCotiz, fchCotiz }`
+- **WSFEv1** — facturar / notaCredito / notaDebito (never retried), armarComprobante (pure, returns request/importes/intento), recuperarComprobante(intento) → autorizado | no_emitido | conflicto, requiereRecuperacion (10016 by number, 703 CAEA)
+- 6.1 validations: class A/M (and 34, 39, 60, 63, 51-54) require docTipo 80; NC/ND need cbtesAsoc or periodoAsoc; B to No Categorizado needs tributo 13; FCE needs `vtoPago` (new top-level option, independent of `servicio`); raw API sums checked. `Moneda.GUARANIES`='029', `BOLIVIANOS`='031' (were swapped)
+- `condicionIva` required when docTipo != 99 (RG 5616); with docTipo 99 the simplified API sends 5 (only the raw API demands it explicitly)
+- Errors: WSFE 600/601 and WSFEX 1000/1001 → `ArcaAuthError` (retryable false, faultCode '600', ArcaWSFEError in cause; ticket not cleared). 602 is still ArcaWSFEError. `ArcaResultadoIncierto` / `ArcaResultadoInciertoExpo` for uncertain emissions; new `ArcaConflictoExpo` (WSFEX Id already used by another request: not authorized). Malformed query responses → `ArcaResponseError` (re-exported)
 - **QR** — `arca.urlQR(facturaResult)`, `generarUrlQR`, `urlQRDesdeFactura`; base URL https://www.arca.gob.ar/fe/qr/
-- `getCotizacion(monedaId, { fecha? })` returns ResultGet `{ MonId, MonCotiz, FchCotiz }`; CAEA requires fechaHoraGeneracion
-- Deprecated: `Arca.formatDate` (use common formatDate), `Arca.calcularTotales`, `Arca.extractCAE`; ArcaWSFEError extends ArcaServiceError
 
-### @ramiidv/arca-padron ^0.5.0
-- **A4** getPersona, **A10** getPersonaBasic, A13, A100, constancia. Business faults → `ArcaPadronServiceError` with `reason` (inexistente, inactiva, id_invalido, no_autorizado, otro)
-- `status()` → one PromiseSettledResult per service (a5, a4, a10, a13, a100); the route serializes it as `{ ok, status | error }`
-- `condicionIvaDesdePadron(persona)` → `{ condicionIva | null, motivo }` (used for `condicionIvaSugerida`)
+### @ramiidv/arca-padron ^0.7.0
+- **A4** getPersona, **A10** getPersonaBasic, A13, A100, constancia. Business faults → `ArcaPadronServiceError` with `reason` (inexistente, inactiva, id_invalido, no_autorizado, otro); "No existe persona con ese Id" in the constancia is now `inexistente` too
+- `status()` → one `ServiceStatus` per service (a5, a4, a10, a13, a100); the route serializes the Error as a message
+- `condicionIvaDesdePadron(persona)` → `{ condicionIva | null, motivo }` (used for `condicionIvaSugerida`); warns about `errorConstancia` even when determined; impuesto 33 → null
+- Personas carry `metadata` ({ fechaHora, servidor }); batch constancia returns per-item errors; low-level `WsAuth` is camelCase
 
-### @ramiidv/arca-cdc ^0.4.0
-- `constatar(CmpReq)`: `CbteModo` (CAE|CAI|CAEA) and `CuitEmisor` required; Resultado R = functional rejection (Observaciones); ARCA `Errors` thrown as ArcaServiceError
+### @ramiidv/arca-cdc ^0.6.0
+- `constatar(input)` camelCase: `cbteModo` (CAE|CAI|CAEA), `cuitEmisor`, `ptoVta`, `cbteTipo`, `cbteNro`, `cbteFch`, `impTotal`, `codAutorizacion`, `docTipoReceptor?`, `docNroReceptor?`, `opcionales?` → `{ resultado, fchProceso, cmpResp?, observaciones, events }`. Resultado R = functional rejection (observaciones; cmpResp may be missing); ARCA `Errors` → ArcaServiceError; unexpected shape → ArcaResponseError
+- `getTiposCbte()` → `[{ id, desc }]`
 
-### @ramiidv/arca-fecred ^0.4.0
-- `consultarMontoObligadoRecepcion({ cuitConsultada, fechaEmision })`, `consultarCtasCtes({ rol, ... })` → `{ ctasCtes, nroPagina?, hayMas?, observaciones }`
+### @ramiidv/arca-fecred ^0.6.0
+- `consultarMontoObligadoRecepcion({ cuitConsultada, fechaEmision })` (`obligado` optional), `consultarCtasCtes({ rol, ... })` → `{ ctasCtes, nroPagina?, hayMas?, observaciones }` (response enums are open strings)
 - `aceptarFECred({ idCtaCte, saldoAceptado, codMoneda, cotizacionMonedaUlt, ... })`, `rechazarFECred({ idCtaCte, motivos[] })`; idCtaCte = `{ codCtaCte }` | `{ idFactura }`
+- `wscommon_*` faults → ArcaAuthError; ArcaServiceError messages include the method
 
-### @ramiidv/arca-mtxca ^0.4.0
-- `autorizar(ComprobanteType)` with XSD names (codigoTipoComprobante, numeroPuntoVenta, importeSubtotal, codigoMoneda, items[], subtotalesIVA[]...). Rejection returns `resultado: 'R'` (does not throw) → route answers 422
+### @ramiidv/arca-mtxca ^0.6.0
+- `autorizar(ComprobanteType)` with XSD names (codigoTipoComprobante, numeroPuntoVenta, importeSubtotal, codigoMoneda, condicionIVAReceptor (required), items[], subtotalesIVA[]...). Rejection returns `resultado: 'R'` (does not throw) → route answers 422; approved → route adds `urlQR`
+- Round Half Even; FCE: fechaVencimientoPago required in 201/206; `informarComprobanteCAEA` requires `fechaHoraGen` (rule 754); `onEvento` config
 
-### @ramiidv/arca-sire ^0.4.0
-- Only `emitirCertificado(params)` → `{ certificadoNro, codigoSeguridad }`, `anularCertificado({ numeroCertificado, motivoAnulacion, codigoTrazabilidad? })`, `status()`. No query operations exist
+### @ramiidv/arca-sire ^0.5.0
+- Only `emitirCertificado(params)` → `{ certificadoNro, codigoSeguridad }`, `anularCertificado({ numeroCertificado, motivoAnulacion, codigoTrazabilidad? })`, `status()` (+ `headerInfo`). No query operations exist
+- Date rules validated locally (fechaRetencion >= 2019-12-01, fechaComprobante <= fechaRetencion); token faults → ArcaAuthError; `soapenv:Client` faults → ArcaSireServiceError
 
-### @ramiidv/arca-agro ^0.4.0
+### @ramiidv/arca-agro ^0.6.0
 - **WSCPE** (`agro.cpe`, requests follow the XSD: cabecera, origen, datosCarga, destino, transporte...) and **WSLPG** (`agro.lpg.liquidacionAutorizar({ liquidacion, ... })`). No `agro.ctg`
-- `status()` → `{ cpe, lpg }` with `{ ok: true, status } | { ok: false, error }` (allSettled)
+- `status()` → `{ cpe, lpg }` with ServiceStatus
+- PDF errors (WSCPE 550, WSLPG 1021) don't cancel the operation: returned in `advertencias` (no `pdf`). `ArcaAgroServiceError.uncertain` = errors AND a result (CTG/COE) → route answers 502 + uncertain. New recovery queries (cgConsultarXNroOrden, ajusteXNroOrdenConsultar...)
 
-### @ramiidv/arca-empleados ^0.4.0
-- `new ArcaEmpleados({ strict? })` (no cuitEmpleador) with `alta` (AT), `baja` (BT, fechaFin), `modificacion` (MR), `novedad` (any code)
+### @ramiidv/arca-empleados ^0.5.0
+- `new ArcaEmpleados({ strict?, fechaReferencia? })` (no cuitEmpleador) with `alta` (AT), `baja` (BT, fechaFin), `modificacion` (MR), `novedad` (any code)
+- `fechaInicio` required for every movement; unknown properties rejected (ArcaValidationError) in both modes; alta with fechaInicio > 90 days after `fechaReferencia` rejected in strict mode
 - `generar()` → `{ contenido, lineas, encoding, buffer, resumen }`; `buffer` is ISO-8859-1 with CRLF
 
 Key methods used in this project:
@@ -103,9 +114,10 @@ Key methods used in this project:
 - `arca.urlQR(result)` — QR URL; `formatDate(arca.wsaa.now())` — invoice date with ARCA's clock
 - `padron.getPersona(cuit)` + `condicionIvaDesdePadron`, `padron.getPersonaBasic(cuit)`, `padron.status()`
 - `cdc.constatar(input)`, `cdc.status()`, `cdc.getTiposCbte()`
-- `arca.consultarComprobante(tipo, pv, nro)` — ResultGet (route flattens nested lists to arrays)
+- `arca.consultarComprobante(tipo, pv, nro)` — resultGet (route spreads it and defaults the optional lists to [])
 - `arca.getPuntosVenta()` (not cached), `arca.getTipos*()`, `arca.getCondicionesIva()`, `arca.getCotizacion(monedaId, { fecha })`
-- `arca.status()` — WSFE/WSFEX health (`{ wsfe, wsfex }` with `{ ok, status }`); `/afip/status` keeps returning `{ AppServer, DbServer, AuthServer }` of WSFE
+- `arca.status()` — WSFE/WSFEX health; `/afip/status` returns `{ wsfe, wsfex }` each `{ ok, status: { appserver, dbserver, authserver } }` or `{ ok: false, error, status? }`
+- `wsaa.resetLoginCooldown()` — via POST /afip/wsaa-reset after fixing a permanent WSAA error
 
 ## Certificate Management (via arca-cert)
 
@@ -118,11 +130,11 @@ The arca-cert package automates AFIP certificate lifecycle:
 - Error handling: ArcaCertError with codes (INVALID_CUIT, LOGIN_FAILED, SESSION_EXPIRED, WSAA_ERROR, CERTIFICATE_ERROR, etc.) mapped to HTTP status codes in errorHandler
 
 ## Invoice Types and Rules
-- **Factura A (tipo 1):** Responsable Inscripto → RI. Requires CUIT (DocTipo=80). Discriminates IVA.
+- **Factura A (tipo 1):** Responsable Inscripto → RI. Requires CUIT (DocTipo=80, validated by the SDK since 6.1). Discriminates IVA.
 - **Factura B (tipo 6):** RI → Consumidor Final/Mono/Exento. DocTipo optional (99=CF, 80=CUIT, 96=DNI, 86=CUIL). Discriminates IVA.
 - **Factura C (tipo 11):** Monotributista → anyone. DocTipo optional. Does NOT discriminate IVA (isTipoC).
 - **NC/ND (3,8,13 / 2,7,12):** Created from existing approved invoices via notaCredito/notaDebito. Type auto-inferred from original.
-- **Receptor IVA condition (RG 5616):** `condicionIva` required when docTipo != 99. Taken from the request body, else from the client (`Client.ivaCondition`), else (NC/ND) from the original invoice's stored emission.
+- **Receptor IVA condition (RG 5616):** `condicionIva` required when docTipo != 99 (with 99 the SDK sends 5). Taken from the request body, else from the client (`Client.ivaCondition`), else (NC/ND) from the original invoice's stored emission.
 - **Service dates:** FchServDesde/FchServHasta/FchVtoPago only required when concepto = Servicios (2) or Productos y Servicios (3).
 
 ## Security
@@ -150,18 +162,29 @@ The arca-cert package automates AFIP certificate lifecycle:
 ## Uncertain emission flow (arca-facturacion "Emisión segura")
 1. Reserve cbteNro (ultimoComprobante + 1) and fecha (formatDate(arca.wsaa.now())); `armarComprobante` validates offline and returns the `intento`.
 2. Persist the Invoice with resultado "P" and `emision` BEFORE sending (a crash mid-send leaves it recoverable).
-3. Send. Approved → "A" + CAE + QR. Rejected (ArcaWSFEError / aprobada false) → row deleted, error returned (not issued).
+3. Send. Approved → "A" + CAE + QR. Rejected (ArcaWSFEError / ArcaAuthError incl. 600/601 / aprobada false) → row deleted, error returned (not issued).
 4. Uncertain (ArcaResultadoIncierto, uncertain ArcaSoapError, or 10016 by number) → wait AFIP_RECOVERY_DELAY_MS → `recuperarComprobante(intento)`:
    - autorizado → "A" with the recovered CAE
-   - no_emitido → resend ONCE with the same opts (same cbteNro and fecha; safe per README: a late original would make ARCA reject the duplicate). If ARCA rejects the resend → not issued: row deleted, 422
+   - no_emitido → resend ONCE with the same opts (same cbteNro and fecha; safe per README: a late original would make ARCA reject the duplicate). If ARCA rejects the resend (ArcaWSFEError except 6xx) → not issued: row deleted, 422. ArcaAuthError (incl. 600/601), 602 or network → stays "P"
    - conflicto → "C" (manual review)
    - no certainty → stays "P"; retry with POST /api/invoices/:id/recuperar
 5. While a "P" invoice exists for a (cbteTipo, puntoVenta), new emissions of that pair answer 409.
 
-## Endpoint changes (SDK migration, 2026-11)
+## Endpoint changes (first migration to the modular SDKs; superseded where noted below)
 - New: POST /api/invoices/:id/recuperar, POST /api/afip/sire-emitir (alias /sire-retencion), POST /api/afip/sire-anular (body AnularCertificadoParams), POST /api/afip/empleados-generar?formato=txt (TXT download)
 - Removed: POST /api/afip/agro-ctg-solicitar, POST /api/afip/sire-consultar, GET /api/afip/sire-regimenes, DELETE /api/afip/sire-anular/:nro
-- Changed: /constatar (CbteModo, CuitEmisor), /cotizacion (ResultGet, ?fecha), /comprobante (arrays), /fecred-* (XSD payloads, fechaEmision query), /mtxca-autorizar (ComprobanteType, R → 422), /padron-status and /agro-status (per-service { ok, status | error }), /contribuyente/:cuit (+ condicionIvaSugerida), /empleados-generar (fixed-width format)
+- Changed: /constatar (cbteModo, cuitEmisor — camelCase since cdc 0.5), /cotizacion (?fecha), /comprobante (arrays), /fecred-* (XSD payloads, fechaEmision query), /mtxca-autorizar (ComprobanteType, R → 422), /padron-status and /agro-status (per-service { ok, status | error }), /contribuyente/:cuit (+ condicionIvaSugerida), /empleados-generar (fixed-width format)
+
+## Endpoint changes (SDK upgrade to facturacion 6.1 / common 0.7, 2026-11) — JSON is now the SDKs' camelCase
+- GET /api/afip/status: was `{ AppServer, DbServer, AuthServer }` → `{ wsfe, wsfex }` ServiceStatus with `appserver/dbserver/authserver`
+- GET /api/afip/comprobante: PascalCase ResultGet → camelCase resultGet (`cbteFch`, `impTotal`, `impIva`, `iva`, `tributos`, `cbtesAsoc`, `opcionales`, `observaciones`, `events`)
+- GET /api/afip/cotizacion: `{ monId, monCotiz, fchCotiz }`; GET /api/afip/puntos-venta: `{ nro, emisionTipo, bloqueado, fchBaja }`; param tables `{ id, desc, fchDesde, fchHasta }`; /cdc-tipos-cbte `{ id, desc }`
+- GET /api/afip/last-voucher: `{ cbteNro, ptoVta, cbteTipo }`; GET /api/afip/mtxca-ultimo-comprobante: `{ cbteNro, ptoVta, cbteTipo }`
+- POST /api/afip/constatar: camelCase body and result (PascalCase body → 400)
+- /padron-status, /agro-status: `{ ok: false, error, status? }` (status when a server is down); /contribuyente adds `metadata`; /mtxca-autorizar adds `urlQR`
+- New: POST /api/afip/wsaa-reset; /empleados-generar accepts `fechaReferencia`
+- Errors: ArcaAuthError adds `retryable`, `faultCode`, `blocked`; new 409 ArcaConflictoExpo; ArcaResponseError → 502; uncertain ArcaAgroServiceError → 502
+- `Invoice.emision.encontrado` (conflicts) stored in camelCase from now on (older rows keep PascalCase)
 
 ## Environment variables (backend)
 - DATABASE_URL, JWT_SECRET (required), JWT_EXPIRES_IN, PORT, CORS_ORIGIN
@@ -172,8 +195,10 @@ The arca-cert package automates AFIP certificate lifecycle:
 
 ## Testing
 - `npm test` (vitest), no network or certificate needed:
-  - tests/arca-sdk.test.ts — enums, common formatDate (strict, Argentina timezone), QR (generarUrlQR, urlQRDesdeFactura, Arca.generateQRUrl baseUrl), calcularTotales, armarComprobante + intento, condicionIva requirement, requiereRecuperacion, error classes, CUIT validation in constructors, empleados fixed-width file
+  - tests/arca-sdk.test.ts — enums (Moneda 029/031), common formatDate (strict, Argentina timezone), QR (generarUrlQR, urlQRDesdeFactura, ArcaFacturacion.generateQRUrl baseUrl), calcularTotales, armarComprobante + intento and 6.1 validations, condicionIva requirement, requiereRecuperacion, error classes, CUIT/cert validation in constructors, shared wsaa (and environment mismatch), empleados fixed-width file
+  - tests/afip-routes.e2e.test.ts — /api/afip routes with the real arca.service and SDKs, ARCA mocked through fetch: shared WsaaClient, camelCase shapes, WSFE 600 → 503, 602 → 422, constatar, ArcaResponseError → 502, permanent WSAA error blocks until /wsaa-reset
+  - tests/arca-service.test.ts — lazy SDKs: boots without certs, 503 on first use
   - tests/errorHandler.test.ts — HTTP mapping of every SDK error and instanceof ordering
   - tests/invoice.service.test.ts — emission and uncertain → recover flow with mocked arca.service and in-memory Prisma
-  - tests/afip-empleados.route.test.ts — /empleados-generar JSON and ?formato=txt (ISO-8859-1, Content-Disposition)
-  - Integration tests (describe.skipIf, need ARCA_INTEGRATION=1 + AFIP_CUIT + certs): serverStatus, getTipos*, getCotizacion, facturar B + urlQR + recuperarComprobante, consultarComprobante, notaCredito, serverStatusExpo
+  - tests/afip-empleados.route.test.ts — /empleados-generar JSON and ?formato=txt (ISO-8859-1, Content-Disposition), fechaInicio required, unknown keys, fechaReferencia
+  - Integration tests (describe.skipIf, need ARCA_INTEGRATION=1 + AFIP_CUIT + certs): status(), getTipos*, getCotizacion, facturar B + urlQR + recuperarComprobante, consultarComprobante, notaCredito, status().wsfex
