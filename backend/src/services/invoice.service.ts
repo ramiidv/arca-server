@@ -6,6 +6,7 @@ import {
   NOTA_CREDITO_MAP,
   NOTA_DEBITO_MAP,
   ArcaResultadoIncierto,
+  ArcaResponseError,
   ArcaSoapError,
   ArcaWSFEError,
   requiereRecuperacion,
@@ -99,6 +100,7 @@ export interface EmisionGuardada {
   /** Cantidad de envíos a ARCA (el primero más los reenvíos tras `no_emitido`). */
   envios: number;
   ultimoMensaje?: string;
+  /** Conflicto: datos del comprobante que ARCA tiene con ese número (camelCase, como el SDK). */
   encontrado?: Record<string, unknown>;
   actualizado: string;
 }
@@ -191,19 +193,24 @@ function llamar(operacion: Operacion, opts: OptsEmision): Promise<FacturaResult>
 /**
  * Envía el comprobante una vez y clasifica la respuesta:
  * - `aprobada`: ARCA otorgó el CAE.
- * - `incierta`: `ArcaResultadoIncierto` (o un `ArcaSoapError` incierto), o un
- *   rechazo 10016 por número que puede significar que un intento anterior se
- *   autorizó (`requiereRecuperacion`).
+ * - `incierta`: `ArcaResultadoIncierto` (o un `ArcaSoapError`/`ArcaResponseError`
+ *   incierto; el SDK ya los convierte en `ArcaResultadoIncierto` en las emisiones),
+ *   o un rechazo 10016 por número que puede significar que un intento anterior
+ *   se autorizó (`requiereRecuperacion`).
  * - `rechazada`: `aprobada: false` con observaciones (no se emitió).
  * Cualquier otro error se propaga: `ArcaWSFEError` (ARCA rechazó, no se emitió),
- * o errores antes de enviar (validación, WSAA, sin conexión).
+ * `ArcaAuthError` (login WSAA fallido o ticket rechazado con 600/601: no se
+ * procesó), o errores antes de enviar (validación, sin conexión).
  */
 async function enviar(operacion: Operacion, opts: OptsEmision): Promise<Desenlace> {
   let result: FacturaResult;
   try {
     result = await llamar(operacion, opts);
   } catch (e) {
-    if (e instanceof ArcaResultadoIncierto || (e instanceof ArcaSoapError && e.uncertain)) {
+    if (
+      e instanceof ArcaResultadoIncierto ||
+      ((e instanceof ArcaSoapError || e instanceof ArcaResponseError) && e.uncertain)
+    ) {
       return { tipo: 'incierta', motivo: e.message };
     }
     throw e;
@@ -238,17 +245,19 @@ async function resolverIncierto(emision: EmisionGuardada): Promise<{ desenlace: 
   }
 
   if (recuperacion.estado === 'conflicto') {
-    const r = recuperacion.encontrado.ResultGet;
+    // FECompConsultarResult en camelCase (arca-facturacion 6); cbteFch y
+    // codAutorizacion son opcionales (ARCA puede omitirlos).
+    const r = recuperacion.encontrado.resultGet;
     return {
       desenlace: {
         tipo: 'conflicto',
         motivo: `El comprobante ${emision.intento.cbteTipo}-${emision.intento.ptoVta}-${emision.intento.cbteNro} existe en ARCA con otros datos`,
         encontrado: {
-          CbteFch: r?.CbteFch,
-          ImpTotal: r?.ImpTotal,
-          DocTipo: r?.DocTipo,
-          DocNro: r?.DocNro,
-          CodAutorizacion: r?.CodAutorizacion,
+          cbteFch: r?.cbteFch,
+          impTotal: r?.impTotal,
+          docTipo: r?.docTipo,
+          docNro: r?.docNro,
+          codAutorizacion: r?.codAutorizacion,
         },
       },
       reenviado: false,
@@ -259,15 +268,19 @@ async function resolverIncierto(emision: EmisionGuardada): Promise<{ desenlace: 
   try {
     return { desenlace: await enviar(emision.operacion, emision.opts), reenviado: true };
   } catch (e) {
-    // Los errores de token/firma (600-602) no evalúan el comprobante: el envío
-    // original puede seguir en proceso en ARCA, así que no hay certeza de nada.
+    // ArcaWSFEError: ARCA evaluó el reenvío y lo rechazó → con certeza no se emitió.
+    // Excepción: los códigos 6xx no evalúan el comprobante (el original puede seguir
+    // en proceso). Desde arca-facturacion 6.1 el 600/601 (token/firma, CUIT no
+    // relacionada) ya llega como ArcaAuthError y cae en la rama de abajo; el 602
+    // ("no existen datos") sigue siendo ArcaWSFEError y se trata igual por las dudas.
     if (e instanceof ArcaWSFEError && !e.errors.some((err) => err.code >= 600 && err.code <= 699)) {
       return {
         desenlace: { tipo: 'rechazada', motivo: e.message, observaciones: e.errors },
         reenviado: true,
       };
     }
-    // No se pudo enviar (WSAA, red, etc.): sigue pendiente, se puede reintentar.
+    // No se pudo enviar (ArcaAuthError de WSAA o 600/601, red, etc.): sigue
+    // pendiente sin certeza sobre el envío original; se puede reintentar.
     return { desenlace: { tipo: 'incierta', motivo: `No se pudo reenviar: ${(e as Error).message}` }, reenviado: false };
   }
 }
@@ -381,7 +394,8 @@ class InvoiceService {
       try {
         desenlace = await enviar(operacion, opts);
       } catch (e) {
-        // No se emitió (ARCA rechazó con ArcaWSFEError, o falló antes de enviar).
+        // No se emitió: ARCA rechazó (ArcaWSFEError, o ArcaAuthError por 600/601),
+        // o falló antes de enviar (validación, login WSAA).
         await prisma.invoice.delete({ where: { id: creada.id } });
         throw e;
       }
@@ -608,9 +622,15 @@ class InvoiceService {
   }
 
   /**
-   * Condición de IVA del receptor (RG 5616): obligatoria si está identificado
-   * (docTipo distinto de 99). Si no viene, se toma la del cliente. Si falta,
-   * el SDK lanza ArcaValidationError (400).
+   * Condición de IVA del receptor (RG 5616, validación 10246). ARCA la exige
+   * siempre, también con docTipo 99. En la API simplificada de
+   * arca-facturacion 6.1 (`facturar`/`notaCredito`/`notaDebito`):
+   * - docTipo distinto de 99: obligatoria (el SDK no la infiere: un CUIT puede
+   *   ser RI, monotributista o exento). Si no viene, se toma la del cliente; si
+   *   falta, el SDK lanza ArcaValidationError (400).
+   * - docTipo 99 (consumidor final sin identificar): si no viene, el SDK envía
+   *   CONSUMIDOR_FINAL (5). Por eso acá queda undefined.
+   * (Solo la API raw, que no se usa acá, exige `condicionIvaReceptorId` explícito con 99.)
    */
   private async condicionIvaReceptor(docTipo: number, condicionIva?: number, clientId?: number) {
     if (condicionIva !== undefined) return condicionIva;

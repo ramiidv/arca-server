@@ -6,15 +6,15 @@ Sistema de facturación electrónica integrado con AFIP/ARCA (Argentina). Backen
 
 - **Backend:** Node.js 22+, Express 5.2, TypeScript 6, Prisma 7 (driver adapter), PostgreSQL, Zod 4
 - **Frontend:** React 19.2, Vite 8, Tailwind CSS 4 (@tailwindcss/vite), React Hook Form 7
-- **Facturación:** [@ramiidv/arca-facturacion](https://www.npmjs.com/package/@ramiidv/arca-facturacion) ^4.0 — WSFEv1, WSFEX, CAEA, QR, resultado incierto (`recuperarComprobante`)
-- **Padrón:** [@ramiidv/arca-padron](https://www.npmjs.com/package/@ramiidv/arca-padron) ^0.4 — A4, A10, A13, A100, constancia, `condicionIvaDesdePadron`
-- **Constatación:** [@ramiidv/arca-cdc](https://www.npmjs.com/package/@ramiidv/arca-cdc) ^0.3 — WSCDC
-- **FECRED:** [@ramiidv/arca-fecred](https://www.npmjs.com/package/@ramiidv/arca-fecred) ^0.3 — Factura de Crédito Electrónica MiPyME
-- **MTXCA:** [@ramiidv/arca-mtxca](https://www.npmjs.com/package/@ramiidv/arca-mtxca) ^0.3 — Facturación con detalle de artículos
-- **SIRE:** [@ramiidv/arca-sire](https://www.npmjs.com/package/@ramiidv/arca-sire) ^0.3 — Certificados de retención de IVA (C2005)
-- **Agro:** [@ramiidv/arca-agro](https://www.npmjs.com/package/@ramiidv/arca-agro) ^0.3 — WSCPE y WSLPG (WSCTG fue derogado)
-- **Empleados:** [@ramiidv/arca-empleados](https://www.npmjs.com/package/@ramiidv/arca-empleados) ^0.3 — Ingreso masivo de relaciones laborales (TXT de ancho fijo, 130 posiciones)
-- **Common:** [@ramiidv/arca-common](https://www.npmjs.com/package/@ramiidv/arca-common) ^0.4 — WSAA, `FileTicketStorage`, SOAP con fallback TLS legacy, validadores
+- **Facturación:** [@ramiidv/arca-facturacion](https://www.npmjs.com/package/@ramiidv/arca-facturacion) ^6.1 — WSFEv1, WSFEX, CAEA, QR, resultado incierto (`recuperarComprobante`). API en camelCase
+- **Padrón:** [@ramiidv/arca-padron](https://www.npmjs.com/package/@ramiidv/arca-padron) ^0.7 — A4, A10, A13, A100, constancia, `condicionIvaDesdePadron`
+- **Constatación:** [@ramiidv/arca-cdc](https://www.npmjs.com/package/@ramiidv/arca-cdc) ^0.6 — WSCDC (camelCase)
+- **FECRED:** [@ramiidv/arca-fecred](https://www.npmjs.com/package/@ramiidv/arca-fecred) ^0.6 — Factura de Crédito Electrónica MiPyME
+- **MTXCA:** [@ramiidv/arca-mtxca](https://www.npmjs.com/package/@ramiidv/arca-mtxca) ^0.6 — Facturación con detalle de artículos
+- **SIRE:** [@ramiidv/arca-sire](https://www.npmjs.com/package/@ramiidv/arca-sire) ^0.5 — Certificados de retención de IVA (C2005)
+- **Agro:** [@ramiidv/arca-agro](https://www.npmjs.com/package/@ramiidv/arca-agro) ^0.6 — WSCPE y WSLPG (WSCTG fue derogado)
+- **Empleados:** [@ramiidv/arca-empleados](https://www.npmjs.com/package/@ramiidv/arca-empleados) ^0.5 — Ingreso masivo de relaciones laborales (TXT de ancho fijo, 130 posiciones)
+- **Common:** [@ramiidv/arca-common](https://www.npmjs.com/package/@ramiidv/arca-common) ^0.7 — WSAA (un `WsaaClient` compartido por todos los SDKs), `FileTicketStorage`, SOAP con fallback TLS legacy, validadores
 - **Certificados:** [arca-cert](https://www.npmjs.com/package/arca-cert) — Generación automática de certificados AFIP
 - **Infra:** Docker Compose, Nginx
 
@@ -22,10 +22,11 @@ Sistema de facturación electrónica integrado con AFIP/ARCA (Argentina). Backen
 
 ### Facturación
 
-- Factura A, B, C con validación por tipo (A requiere CUIT, C no discrimina IVA)
+- Factura A, B, C con validación por tipo (A requiere receptor con CUIT, `docTipo` 80; C no discrimina IVA)
 - Notas de crédito y débito asociadas a facturas existentes
 - Cálculo automático de IVA y totales (via SDK); el número se reserva como último autorizado + 1 y las emisiones se serializan por punto de venta y tipo
 - Condición de IVA del receptor (RG 5616) obligatoria si está identificado: se toma del body o del cliente
+  (con `docTipo` 99 el SDK envía Consumidor Final, 5)
 - **Emisión segura:** la factura se guarda como pendiente con el intento *antes* de enviarla; un resultado incierto nunca se da por rechazado (ver [Resultado incierto](#resultado-incierto))
 - QR oficial de ARCA (`arca.urlQR`) generado y persistido por factura
 - Fechas de servicio condicionales según concepto (solo para Servicios y Productos y Servicios)
@@ -60,7 +61,13 @@ Sistema de facturación electrónica integrado con AFIP/ARCA (Argentina). Backen
 ### Observabilidad
 
 - Logging de eventos de todos los SDKs (`onEvent`): auth login/cache-hit/clock-skew/storage-error, request end/retry/error
-- Tickets de Acceso de WSAA persistidos en disco (`FileTicketStorage`, compartido por todos los SDKs): un reinicio no deja al server sin acceso (`ArcaTicketVigenteError`)
+- Un solo `WsaaClient` (`createWsaaClient` de arca-common) compartido por los 7 SDKs: mismos tickets, reloj y esperas de login
+- Tickets de Acceso de WSAA persistidos en disco (`FileTicketStorage`): un reinicio no deja al server sin acceso (`ArcaTicketVigenteError`)
+- Tras un error permanente de WSAA (certificado vencido o no confiable, `coe.notAuthorized`...) el servicio queda
+  bloqueado hasta corregir la causa y llamar a `POST /api/afip/wsaa-reset` (botón "Reintentar autenticación" en
+  Configuración) o generar/renovar el certificado
+- Los SDKs se crean al primer uso: el server arranca sin certificado (para poder generarlo desde la UI) y las
+  rutas de ARCA responden 503 con un mensaje claro hasta instalarlo
 - Tiempos de respuesta de cada request a AFIP
 - Retries automáticos con backoff exponencial
 
@@ -209,16 +216,18 @@ Sigue el flujo "Emisión segura" del README de arca-facturacion:
    punto de venta no se emite otra (409).
 3. Se envía:
    - **Aprobada** → `resultado = "A"`, CAE y QR.
-   - **Rechazada** (`ArcaWSFEError` o `aprobada: false`) → no se emitió: se borra el registro y se
-     informa el error (422/400).
+   - **Rechazada** (`ArcaWSFEError`, `ArcaAuthError` por WSFE 600/601 o `aprobada: false`) → no se emitió:
+     se borra el registro y se informa el error (422/503/400).
    - **Incierta** (`ArcaResultadoIncierto`, o 10016 por número según `requiereRecuperacion`) → se espera
      `AFIP_RECOVERY_DELAY_MS` y se llama a `recuperarComprobante(intento)`:
      - `autorizado` → aprobada con el CAE recuperado.
      - `no_emitido` → se reenvía **una vez** con las mismas opciones (mismo número y fecha). Es seguro
        según el README: si el intento original llegara a autorizarse, ARCA rechaza el duplicado (10016).
-       Si ARCA rechaza el reenvío, con certeza no se emitió: se borra el registro (libera el número) y
-       responde 422.
-     - `conflicto` → `resultado = "C"` (el número existe con otros datos): revisión manual.
+       Si ARCA rechaza el reenvío (`ArcaWSFEError` salvo 6xx), con certeza no se emitió: se borra el
+       registro (libera el número) y responde 422. Si el reenvío falla sin evaluar el comprobante
+       (`ArcaAuthError`, incluido el 600/601 que desde arca-facturacion 6.1 llega así, el 602, red), sigue `"P"`.
+     - `conflicto` → `resultado = "C"` (el número existe con otros datos): revisión manual. Lo encontrado se
+       guarda en `emision.encontrado` en camelCase (`cbteFch`, `impTotal`, `docTipo`, `docNro`, `codAutorizacion`).
      - Sin certeza (no se pudo consultar ni reenviar) → sigue `"P"`; se reintenta con
        `POST /api/invoices/:id/recuperar` (también si el proceso se cayó durante el envío).
 
@@ -230,11 +239,14 @@ Migración: `20261101120000_add_invoice_emision` agrega `Invoice.emision` (JSONB
 | ------------- | ---- | ------ |
 | `ArcaValidationError` | 400 | `field`, `details` (no se envió nada a ARCA) |
 | `ArcaResultadoIncierto` / `ArcaResultadoInciertoExpo` | 502 | `uncertain: true`, `recuperacion` (intento / Id) |
+| `ArcaConflictoExpo` | 409 | `details: { id, enviado, respuesta }`: el `Id` de WSFEX ya lo usaba otra solicitud; el comprobante no se autorizó |
 | `ArcaTicketVigenteError` | 503 | `service` |
-| `ArcaAuthError` | 503 | |
-| `ArcaPadronServiceError` | 404 (`inexistente`), 422 (`inactiva`), 400 (`id_invalido`), 502 (`no_autorizado`) | `reason`, `errors` |
-| `ArcaWSFEError` y otros `ArcaServiceError` | 422 | `errors` |
-| `ArcaSoapError` | 502 (504 si fue timeout sin respuesta) | `soapFault`, `uncertain`, `upstreamStatus` |
+| `ArcaAuthError` | 503 | `retryable`, `faultCode`, `blocked` (WSAA bloqueó el servicio tras un error permanente: corregir y `POST /api/afip/wsaa-reset`). Incluye WSFE 600/601 (`faultCode: "600"`) |
+| `ArcaPadronServiceError` | 404 (`inexistente`, también "No existe persona" de la constancia), 422 (`inactiva`), 400 (`id_invalido`), 502 (`no_autorizado`) | `reason`, `errors` |
+| `ArcaAgroServiceError` con `uncertain` | 502 | `uncertain: true`, `errors`: hubo errores pero también resultado (CTG/COE): consultar antes de reintentar |
+| `ArcaWSFEError` (incluido 602) y otros `ArcaServiceError` | 422 | `errors` |
+| `ArcaSoapError` | 502 (504 si fue timeout sin respuesta) | `soapFault`, `uncertain`, `upstreamStatus` (no se exponen `responseBody` ni `faultDetail`) |
+| `ArcaResponseError` (incluye `ArcaAgroResponseError`) | 502 | `uncertain`: ARCA respondió con una forma inesperada |
 
 ### Clientes
 
@@ -250,13 +262,14 @@ Migración: `20261101120000_add_invoice_emision` agrega `Invoice.emision` (JSONB
 
 | Método | Ruta | Descripción |
 | ------ | ---- | ----------- |
-| GET | `/api/afip/status` | Estado servidores WSFE |
-| GET | `/api/afip/contribuyente/:cuit` | Consulta padrón A4 + `condicionIvaSugerida` |
-| GET | `/api/afip/comprobante` | Consultar comprobante (query: puntoVenta, cbteTipo, cbteNro). `ResultGet` con listas como arrays |
-| GET | `/api/afip/cotizacion` | Cotización (query: monedaId, fecha opcional). Devuelve `{ MonId, MonCotiz, FchCotiz }` |
-| GET | `/api/afip/puntos-venta` | Puntos de venta habilitados |
-| GET | `/api/afip/last-voucher` | Último comprobante (query: puntoVenta, cbteTipo) |
-| GET | `/api/afip/invoice-types` | Tipos de comprobante |
+| GET | `/api/afip/status` | Estado de WSFEv1 y WSFEX: `{ wsfe, wsfex }`, cada uno `{ ok: true, status: { appserver, dbserver, authserver } }` o `{ ok: false, error, status? }` (`ok` es false si algún servidor no está en OK) |
+| POST | `/api/afip/wsaa-reset` | Vuelve a habilitar el login en WSAA tras corregir un error permanente (`resetLoginCooldown`) |
+| GET | `/api/afip/contribuyente/:cuit` | Consulta padrón A4 (incluye `metadata`) + `condicionIvaSugerida` |
+| GET | `/api/afip/comprobante` | Consultar comprobante (query: puntoVenta, cbteTipo, cbteNro). `resultGet` del SDK en camelCase (`cbteFch`, `impTotal`, `codAutorizacion`...) con `iva`, `tributos`, `cbtesAsoc`, `opcionales`, `observaciones` y `events` siempre como arrays |
+| GET | `/api/afip/cotizacion` | Cotización (query: monedaId, fecha opcional). Devuelve `{ monId, monCotiz, fchCotiz }` |
+| GET | `/api/afip/puntos-venta` | Puntos de venta habilitados: `[{ nro, emisionTipo?, bloqueado?, fchBaja? }]` |
+| GET | `/api/afip/last-voucher` | Último comprobante (query: puntoVenta, cbteTipo): `{ cbteNro, ptoVta, cbteTipo }` |
+| GET | `/api/afip/invoice-types` | Tipos de comprobante. Las tablas de parámetros devuelven `[{ id, desc, fchDesde?, fchHasta? }]` (condiciones de IVA: `{ id, desc, cmpClase? }`) |
 | GET | `/api/afip/doc-types` | Tipos de documento |
 | GET | `/api/afip/iva-types` | Alícuotas IVA |
 | GET | `/api/afip/iva-conditions` | Condiciones frente al IVA |
@@ -265,25 +278,31 @@ Migración: `20261101120000_add_invoice_emision` agrega `Invoice.emision` (JSONB
 | GET | `/api/afip/tributo-types` | Tipos de tributo |
 | GET | `/api/afip/optional-types` | Datos opcionales |
 | GET | `/api/afip/contribuyente-basic/:cuit` | Consulta padrón A10 (básico) |
-| GET | `/api/afip/padron-status` | Estado por servicio (a5, a4, a10, a13, a100): `{ ok, status \| error }` |
-| POST | `/api/afip/constatar` | Constatar comprobante via WSCDC. Body `CmpReq`: `CbteModo` (CAE/CAI/CAEA) y `CuitEmisor` obligatorios |
-| GET | `/api/afip/cdc-status` | Estado servicio WSCDC |
-| GET | `/api/afip/cdc-tipos-cbte` | Tipos de comprobante WSCDC |
+| GET | `/api/afip/padron-status` | Estado por servicio (a5, a4, a10, a13, a100): `{ ok, status }` o `{ ok: false, error, status? }` |
+| POST | `/api/afip/constatar` | Constatar comprobante via WSCDC. Body camelCase (`ConstatarInput` de arca-cdc): `cbteModo` (CAE/CAI/CAEA), `cuitEmisor`, `ptoVta`, `cbteTipo`, `cbteNro`, `cbteFch`, `impTotal`, `codAutorizacion`, `docTipoReceptor?`, `docNroReceptor?`, `opcionales?`. Devuelve `{ resultado, fchProceso, cmpResp?, observaciones, events }` |
+| GET | `/api/afip/cdc-status` | Estado servicio WSCDC (`{ appserver, dbserver, authserver }`) |
+| GET | `/api/afip/cdc-tipos-cbte` | Tipos de comprobante WSCDC (`[{ id, desc }]`) |
 | GET | `/api/afip/fecred-status` | Estado WSFECRED |
 | GET | `/api/afip/fecred-obligado/:cuit` | ¿Obligado a recibir FCE? (query `fechaEmision`, default hoy en Argentina) |
 | POST | `/api/afip/fecred-ctas-ctes` | Cuentas corrientes FCE (`{ rol, cuitContraparte?, fecha? }`). Respuesta paginada `{ ctasCtes, nroPagina, hayMas }` |
 | POST | `/api/afip/fecred-aceptar` | Aceptar FCE (`{ idCtaCte, saldoAceptado, codMoneda, cotizacionMonedaUlt, ... }`) |
 | POST | `/api/afip/fecred-rechazar` | Rechazar FCE (`{ idCtaCte, motivos: [{ codMotivo, descMotivo, justificacion }] }`) |
 | GET | `/api/afip/mtxca-status` | Estado WSMTXCA |
-| POST | `/api/afip/mtxca-autorizar` | Autorizar con detalle de artículos (`ComprobanteType` del XSD). Resultado `R` → 422 |
-| GET | `/api/afip/mtxca-ultimo-comprobante` | Último comprobante MTXCA |
-| GET | `/api/afip/sire-status` | Estado SIRE |
+| POST | `/api/afip/mtxca-autorizar` | Autorizar con detalle de artículos (`ComprobanteType` del XSD; `condicionIVAReceptor` obligatoria). Resultado `R` → 422; aprobado incluye `urlQR` |
+| GET | `/api/afip/mtxca-ultimo-comprobante` | Último comprobante MTXCA: `{ cbteNro, ptoVta, cbteTipo }` |
+| GET | `/api/afip/sire-status` | Estado SIRE (incluye `headerInfo`: ambiente, fecha, versiones) |
 | POST | `/api/afip/sire-emitir` | Emitir certificado de retención (`emitirCertificado`). Alias: `/api/afip/sire-retencion` |
 | POST | `/api/afip/sire-anular` | Anular certificado (`{ numeroCertificado, motivoAnulacion, codigoTrazabilidad? }`) |
-| GET | `/api/afip/agro-status` | Estado de WSCPE y WSLPG: `{ cpe, lpg }` con `{ ok, status \| error }` |
-| POST | `/api/afip/agro-cpe-autorizar` | Autorizar Carta de Porte automotor (request según el XSD de WSCPE) |
-| POST | `/api/afip/agro-lpg-autorizar` | Autorizar liquidación de granos (`{ liquidacion, deducciones?, retenciones?, percepciones? }`) |
-| POST | `/api/afip/empleados-generar` | Archivo de relaciones laborales (`{ registros: [{ tipo: alta\|baja\|modificacion\|novedad, data }], strict? }`). Con `?formato=txt` descarga el TXT (ISO-8859-1) |
+| GET | `/api/afip/agro-status` | Estado de WSCPE y WSLPG: `{ cpe, lpg }` con `{ ok, status }` o `{ ok: false, error, status? }` |
+| POST | `/api/afip/agro-cpe-autorizar` | Autorizar Carta de Porte automotor (request según el XSD de WSCPE). El error 550 (PDF) vuelve en `advertencias` |
+| POST | `/api/afip/agro-lpg-autorizar` | Autorizar liquidación de granos (`{ liquidacion, deducciones?, retenciones?, percepciones? }`). El error 1021 (PDF) vuelve en `advertencias` |
+| POST | `/api/afip/empleados-generar` | Archivo de relaciones laborales (`{ registros: [{ tipo: alta\|baja\|modificacion\|novedad, data }], strict?, fechaReferencia? }`). `fechaInicio` obligatoria en todos los movimientos; propiedades desconocidas → 400. Con `?formato=txt` descarga el TXT (ISO-8859-1) |
+
+**Cambio de contrato (arca-facturacion 6.1 / arca-common 0.7):** las respuestas de `/api/afip/*` usan los nombres
+camelCase de los SDKs. Cambiaron `/status` (antes `{ AppServer, DbServer, AuthServer }`), `/comprobante`,
+`/cotizacion`, `/puntos-venta`, las tablas de parámetros, `/cdc-tipos-cbte`, `/last-voucher`,
+`/mtxca-ultimo-comprobante` (antes `{ CbteNro }`) y el body/respuesta de `/constatar` (un body PascalCase responde 400).
+Las integraciones por API key que leían los nombres viejos tienen que actualizarse.
 
 **Eliminados** (no existen en ARCA): `POST /api/afip/agro-ctg-solicitar` (WSCTG derogado, el CTG viene en la
 respuesta de WSCPE), `POST /api/afip/sire-consultar`, `GET /api/afip/sire-regimenes` y
@@ -296,7 +315,7 @@ respuesta de WSCPE), `POST /api/afip/sire-consultar`, `GET /api/afip/sire-regime
 | POST | `/api/afip/generate-cert` | Generar certificado AFIP (timeout: 2min) |
 | POST | `/api/afip/renew-cert` | Renovar certificado (alias nuevo) |
 | GET | `/api/afip/cert-info` | Expiración del cert actual (días restantes) |
-| POST | `/api/afip/test-cert` | Verificar cert contra WSAA |
+| POST | `/api/afip/test-cert` | Verificar el cert contra WSAA (`environment`: `production` o `testing`); el ticket queda en el storage de los SDKs |
 
 ## Frontend
 
@@ -314,7 +333,7 @@ respuesta de WSCPE), `POST /api/afip/sire-consultar`, `GET /api/afip/sire-regime
 | `/clientes/:id/editar` | Editar Cliente | Mismo formulario en modo edición |
 | `/consulta` | Consultar Cbte. | Buscar comprobante en AFIP por PV + tipo + número y constatarlo (WSCDC) |
 | `/parametros` | Parámetros AFIP | Tabs: comprobantes, documentos, IVA, conceptos, monedas, tributos + cotización |
-| `/configuracion` | Configuración | Generar/renovar cert, verificar cert, estado AFIP, info sistema |
+| `/configuracion` | Configuración | Generar/renovar cert, verificar cert, estado de WSFEv1/WSFEX, reintentar autenticación WSAA, info sistema |
 | `/api-keys` | API Keys | Crear, listar y eliminar API keys |
 | `/login` | Login | Email + contraseña |
 | `/register` | Registro | Nombre, email, contraseña |
@@ -345,12 +364,16 @@ npm test                                          # tests unitarios (sin red ni 
 ARCA_INTEGRATION=1 AFIP_CUIT=20XXXXX npm test     # + integración con ARCA homologación (emite comprobantes)
 ```
 
-- `tests/arca-sdk.test.ts`: API de los SDKs (formatDate de common, QR, calcularTotales, armarComprobante,
-  requiereRecuperacion, errores, validación de CUIT, archivo de empleados) e integración con homologación
-  (`describe.skipIf`: requiere `ARCA_INTEGRATION=1`, `AFIP_CUIT` y `backend/certs/cert.crt` + `key.key`).
+- `tests/arca-sdk.test.ts`: API de los SDKs (formatDate de common, QR, calcularTotales, armarComprobante y las
+  validaciones de 6.1, requiereRecuperacion, errores, validación de CUIT/certificado, `wsaa` compartido, archivo
+  de empleados) e integración con homologación (`describe.skipIf`: requiere `ARCA_INTEGRATION=1`, `AFIP_CUIT` y
+  `backend/certs/cert.crt` + `key.key`).
+- `tests/afip-routes.e2e.test.ts`: rutas `/api/afip` con los SDKs reales y ARCA simulado (`mockFetchWith` de
+  `@ramiidv/arca-common/testing`): WSAA compartido, shapes camelCase, 600 → 503, bloqueo de WSAA y `/wsaa-reset`.
+- `tests/arca-service.test.ts`: el server arranca sin certificados (SDKs lazy, 503 al usarlos).
 - `tests/errorHandler.test.ts`: mapeo de cada error de los SDKs a HTTP.
 - `tests/invoice.service.test.ts`: flujo incierto → recuperar con el SDK y Prisma mockeados.
-- `tests/afip-empleados.route.test.ts`: `/empleados-generar` con `?formato=txt`.
+- `tests/afip-empleados.route.test.ts`: `/empleados-generar` con `?formato=txt`, `fechaInicio` y `fechaReferencia`.
 
 ## Licencia
 

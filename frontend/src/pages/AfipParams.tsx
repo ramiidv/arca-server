@@ -13,14 +13,9 @@ import toast from 'react-hot-toast';
 import { MagnifyingGlassIcon } from '@heroicons/react/24/outline';
 import { getApiErrorMessage } from '../utils/errors';
 import { formatDate } from '../utils/formatters';
-import type { Cotizacion } from '../types';
+import type { Cotizacion, ParamAfip } from '../types';
 
-interface ParamItem {
-  Id: number | string;
-  Desc: string;
-  FchDesde?: string;
-  FchHasta?: string;
-}
+type ParamItem = ParamAfip;
 
 const TABS = [
   { key: 'comprobantes', label: 'Comprobantes' },
@@ -54,7 +49,7 @@ export default function AfipParams() {
     monedas: false,
     tributos: false,
   });
-  // ResultGet de FEParamGetCotizacion: { MonId, MonCotiz, FchCotiz }
+  // FEParamGetCotizacion: { monId, monCotiz, fchCotiz }
   const [cotizacion, setCotizacion] = useState<Cotizacion | null>(null);
   const [cotizLoading, setCotizLoading] = useState(false);
 
@@ -114,6 +109,8 @@ export default function AfipParams() {
 
   const items = data[activeTab];
   const isLoading = loading[activeTab];
+  // fchDesde/fchHasta son opcionales (ARCA puede omitirlos; Cond. IVA no los tiene)
+  const conVigencia = items.some((item) => item.fchDesde !== undefined);
 
   return (
     <div className="space-y-6">
@@ -151,7 +148,7 @@ export default function AfipParams() {
                 <tr className="border-b border-gray-100">
                   <th className="px-4 py-2 text-left text-[11px] font-semibold uppercase tracking-wider text-gray-400">ID</th>
                   <th className="px-4 py-2 text-left text-[11px] font-semibold uppercase tracking-wider text-gray-400">Descripción</th>
-                  {items[0]?.FchDesde !== undefined && (
+                  {conVigencia && (
                     <th className="px-4 py-2 text-left text-[11px] font-semibold uppercase tracking-wider text-gray-400">Vigencia</th>
                   )}
                   {activeTab === 'monedas' && (
@@ -162,18 +159,18 @@ export default function AfipParams() {
               <tbody className="divide-y divide-gray-50">
                 {items.map((item, i) => (
                   <tr key={i} className="transition-colors hover:bg-gray-50/50">
-                    <td className="px-4 py-2 font-mono text-xs text-gray-500">{item.Id}</td>
-                    <td className="px-4 py-2 text-sm text-gray-700">{item.Desc}</td>
-                    {item.FchDesde !== undefined && (
+                    <td className="px-4 py-2 font-mono text-xs text-gray-500">{item.id}</td>
+                    <td className="px-4 py-2 text-sm text-gray-700">{item.desc}</td>
+                    {conVigencia && (
                       <td className="px-4 py-2 text-xs text-gray-400">
-                        {item.FchDesde || '-'} — {item.FchHasta || 'vigente'}
+                        {item.fchDesde || '-'} — {item.fchHasta || 'vigente'}
                       </td>
                     )}
                     {activeTab === 'monedas' && (
                       <td className="px-4 py-2 text-right">
                         <button
                           type="button"
-                          onClick={() => handleCotizacion(String(item.Id))}
+                          onClick={() => handleCotizacion(String(item.id))}
                           disabled={cotizLoading}
                           className="inline-flex items-center gap-1 rounded-md px-2 py-1 text-xs font-medium text-indigo-600 hover:bg-indigo-50"
                         >
@@ -195,13 +192,13 @@ export default function AfipParams() {
         <div className="card border-indigo-200 bg-indigo-50/50">
           <div className="flex items-center justify-between">
             <div>
-              <p className="text-xs text-indigo-600">Cotización Oficial AFIP ({cotizacion.MonId})</p>
+              <p className="text-xs text-indigo-600">Cotización Oficial AFIP ({cotizacion.monId})</p>
               <p className="mt-0.5 text-2xl font-bold text-indigo-900">
-                ${cotizacion.MonCotiz}
+                ${cotizacion.monCotiz}
               </p>
             </div>
             <p className="text-xs text-indigo-400">
-              Fecha: {formatDate(cotizacion.FchCotiz)}
+              Fecha: {formatDate(cotizacion.fchCotiz)}
             </p>
           </div>
         </div>

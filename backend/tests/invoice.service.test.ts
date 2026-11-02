@@ -1,5 +1,6 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import {
+  ArcaAuthError,
   ArcaResultadoIncierto,
   ArcaWSFEError,
   armarComprobante,
@@ -181,6 +182,23 @@ describe('invoice.service: emisión', () => {
     expect(db.invoices.size).toBe(0);
   });
 
+  it('un ArcaAuthError (600/601 o login WSAA) en el primer envío no deja la factura guardada', async () => {
+    const cause = new ArcaWSFEError([{ code: 600, msg: 'ValidacionDeToken: No aparecio CUIT en lista de relaciones' }]);
+    arcaMock.facturar.mockRejectedValue(new ArcaAuthError('ticket rechazado', { cause, faultCode: '600' }));
+
+    await expect(invoiceService.createInvoice(facturaB)).rejects.toBeInstanceOf(ArcaAuthError);
+    expect(db.invoices.size).toBe(0);
+  });
+
+  it('consumidor final (docTipo 99) sin condicionIva: el SDK completa 5', async () => {
+    arcaMock.facturar.mockImplementation(async (opts: any) => aprobada(intentoDe(opts.cbteNro)));
+    await invoiceService.createInvoice(facturaB);
+
+    expect(arcaMock.facturar.mock.calls[0][0]).not.toHaveProperty('condicionIva');
+    const { request } = armarComprobante(arcaMock.armarComprobante.mock.calls[0][0]);
+    expect(request.condicionIvaReceptorId).toBe(5);
+  });
+
   it('un rechazo con observaciones (aprobada: false) no deja la factura guardada', async () => {
     arcaMock.facturar.mockImplementation(async (opts: any) => ({
       ...aprobada(intentoDe(opts.cbteNro)),
@@ -270,14 +288,20 @@ describe('invoice.service: resultado incierto → recuperar', () => {
     arcaMock.facturar.mockRejectedValue(incierto(42));
     arcaMock.recuperarComprobante.mockResolvedValue({
       estado: 'conflicto',
-      encontrado: { ResultGet: { CbteFch: HOY, ImpTotal: 999, DocTipo: 80, DocNro: 30712345671, CodAutorizacion: '1' } },
+      encontrado: { resultGet: { cbteFch: HOY, impTotal: 999, docTipo: 80, docNro: 30712345671, codAutorizacion: '1' } },
     });
 
     const { invoice, afipResponse } = await invoiceService.createInvoice(facturaB);
 
     expect(invoice.resultado).toBe(RESULTADO.CONFLICTO);
     expect(afipResponse).toMatchObject({ conflicto: true, pendiente: false });
-    expect((invoice.emision as any).encontrado).toMatchObject({ ImpTotal: 999 });
+    expect((invoice.emision as any).encontrado).toEqual({
+      cbteFch: HOY,
+      impTotal: 999,
+      docTipo: 80,
+      docNro: 30712345671,
+      codAutorizacion: '1',
+    });
   });
 
   it('no emitido y el reenvío es rechazado → se borra el pendiente (no se emitió) y responde 422', async () => {
@@ -292,16 +316,31 @@ describe('invoice.service: resultado incierto → recuperar', () => {
     expect(db.invoices.size).toBe(0);
   });
 
-  it('no emitido y el reenvío falla por token (600) → sigue pendiente, no se borra', async () => {
+  it('no emitido y el reenvío falla por token (600 → ArcaAuthError desde 6.1) → sigue pendiente, no se borra', async () => {
     arcaMock.facturar.mockRejectedValue(incierto(42));
     arcaMock.recuperarComprobante.mockRejectedValueOnce(new Error('ECONNRESET'));
     const { invoice } = await invoiceService.createInvoice(facturaB);
 
     arcaMock.recuperarComprobante.mockResolvedValue({ estado: 'no_emitido' });
-    arcaMock.facturar.mockRejectedValue(new ArcaWSFEError([{ code: 600, msg: 'ValidacionDeToken: No valido token' }]));
+    const cause = new ArcaWSFEError([{ code: 600, msg: 'ValidacionDeToken: No valido token' }]);
+    arcaMock.facturar.mockRejectedValue(new ArcaAuthError('ticket rechazado', { cause, faultCode: '600' }));
+
+    const r = await invoiceService.recuperarFactura(invoice.id);
+    expect(r.afipResponse).toMatchObject({ pendiente: true });
+    expect(db.invoices.size).toBe(1);
+    expect(db.invoices.get(invoice.id)?.resultado).toBe('P');
+    expect((db.invoices.get(invoice.id)?.emision as any).ultimoMensaje).toMatch(/No se pudo reenviar/);
+  });
+
+  it('no emitido y el reenvío da ArcaWSFEError 602 → sigue pendiente (no evalúa el comprobante)', async () => {
+    arcaMock.facturar.mockRejectedValue(incierto(42));
+    arcaMock.recuperarComprobante.mockRejectedValueOnce(new Error('ECONNRESET'));
+    const { invoice } = await invoiceService.createInvoice(facturaB);
+
+    arcaMock.recuperarComprobante.mockResolvedValue({ estado: 'no_emitido' });
+    arcaMock.facturar.mockRejectedValue(new ArcaWSFEError([{ code: 602, msg: 'Sin Resultados' }]));
 
     await invoiceService.recuperarFactura(invoice.id);
-    expect(db.invoices.size).toBe(1);
     expect(db.invoices.get(invoice.id)?.resultado).toBe('P');
   });
 

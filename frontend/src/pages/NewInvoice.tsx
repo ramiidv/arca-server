@@ -14,6 +14,7 @@ import {
   IVA_ALICUOTAS,
   IVA_CONDITIONS,
   type Client,
+  type PuntoVenta,
 } from '../types';
 import { formatCurrency, todayAsInputDate, inputDateToYYYYMMDD } from '../utils/formatters';
 import { getApiErrorMessage } from '../utils/errors';
@@ -61,7 +62,7 @@ export default function NewInvoice() {
   const navigate = useNavigate();
   const [submitting, setSubmitting] = useState(false);
   const [success, setSuccess] = useState<{ cae: string; cbteNro: number; cbteTipo: number; puntoVenta: number } | null>(null);
-  const [puntosVenta, setPuntosVenta] = useState<{ Nro: number; EmisionTipo: string }[]>([]);
+  const [puntosVenta, setPuntosVenta] = useState<PuntoVenta[]>([]);
   const [clients, setClients] = useState<Client[]>([]);
   const [clientSearch, setClientSearch] = useState('');
   const [showClientDropdown, setShowClientDropdown] = useState(false);
@@ -120,9 +121,9 @@ export default function NewInvoice() {
       .catch(() => {});
     getPuntosVenta()
       .then((data) => {
-        const activos = (Array.isArray(data) ? data : []).filter((p) => p.Bloqueado === 'N');
+        const activos = (Array.isArray(data) ? data : []).filter((p) => p.bloqueado !== 'S'); // bloqueado es opcional en el SDK
         setPuntosVenta(activos);
-        if (activos.length > 0) setValue('puntoVenta', activos[0].Nro);
+        if (activos.length > 0) setValue('puntoVenta', activos[0].nro);
       })
       .catch(() => {});
   }, [setValue]);
@@ -186,8 +187,8 @@ export default function NewInvoice() {
   const totals = calculateTotals();
 
   const onSubmit = async (data: InvoiceFormData) => {
-    // Validación extra: Tipo A requiere CUIT
-    if (esA && (!data.docNro || data.docNro === '0')) {
+    // Validación extra: Tipo A requiere receptor con CUIT (docTipo 80, validación 10013 de ARCA)
+    if (esA && (!data.docNro || data.docNro === '0' || (selectedClient && selectedClient.docType !== 80))) {
       toast.error('Factura A requiere CUIT del receptor');
       return;
     }
@@ -218,7 +219,8 @@ export default function NewInvoice() {
         cbteTipo: Number(data.cbteTipo),
         puntoVenta: Number(data.puntoVenta),
         concepto: Number(data.concepto),
-        docTipo: Number(data.docTipo),
+        // El select queda deshabilitado en tipo A: el valor es siempre CUIT (80)
+        docTipo: esA ? 80 : Number(data.docTipo),
         docNro: data.docNro,
         clientId: data.clientId || undefined,
         // Con cliente, el backend usa su condición de IVA
@@ -374,8 +376,8 @@ export default function NewInvoice() {
                 className="select"
               >
                 {puntosVenta.map((pv) => (
-                  <option key={pv.Nro} value={pv.Nro}>
-                    {String(pv.Nro).padStart(5, '0')} — {pv.EmisionTipo}
+                  <option key={pv.nro} value={pv.nro}>
+                    {String(pv.nro).padStart(5, '0')}{pv.emisionTipo ? ` — ${pv.emisionTipo}` : ''}
                   </option>
                 ))}
               </select>

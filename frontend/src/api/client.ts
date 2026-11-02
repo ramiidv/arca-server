@@ -14,6 +14,9 @@ import type {
   ArchivoEmpleados,
   RegistroEmpleado,
   ParamAfip,
+  ArcaStatus,
+  ServerStatus,
+  UltimoComprobante,
 } from '../types';
 
 const api = axios.create({
@@ -167,17 +170,28 @@ export async function deleteClient(id: number) {
   return data;
 }
 
-// AFIP
+// AFIP — las respuestas usan los nombres camelCase de los SDKs @ramiidv/arca-*
+
+/** Estado de WSFEv1 y WSFEX: `{ wsfe, wsfex }`, cada uno `{ ok, status }` o `{ ok: false, error, status? }`. */
 export async function getAfipStatus() {
   const { data } = await api.get('/afip/status');
-  return unwrap<Record<string, string>>(data);
+  return unwrap<ArcaStatus>(data);
+}
+
+/**
+ * Limpia la espera de WSAA tras un login rechazado por un error permanente
+ * (certificado vencido, servicio no autorizado...). Usar después de corregir la causa.
+ */
+export async function resetWsaa() {
+  const { data } = await api.post('/afip/wsaa-reset');
+  return unwrap<{ message: string }>(data);
 }
 
 export async function getLastVoucher(puntoVenta: number, cbteTipo: number) {
   const { data } = await api.get('/afip/last-voucher', {
     params: { puntoVenta, cbteTipo },
   });
-  return unwrap<{ CbteNro: number; PtoVta: number; CbteTipo: number }>(data);
+  return unwrap<UltimoComprobante>(data);
 }
 
 export async function getPuntosVenta() {
@@ -198,7 +212,7 @@ export async function consultarComprobante(puntoVenta: number, cbteTipo: number,
   return unwrap<ComprobanteAfip>(data);
 }
 
-/** Cotización oficial: `{ MonId, MonCotiz, FchCotiz }`. `fecha` opcional (YYYYMMDD). */
+/** Cotización oficial: `{ monId, monCotiz, fchCotiz }`. `fecha` opcional (YYYYMMDD). */
 export async function getCotizacion(monedaId: string, fecha?: string) {
   const { data } = await api.get('/afip/cotizacion', { params: { monedaId, fecha } });
   return unwrap<Cotizacion>(data);
@@ -250,7 +264,7 @@ export async function getPadronStatus() {
   return unwrap<Record<string, ServicioStatus>>(data);
 }
 
-/** Constatación (WSCDC). `CbteModo` y `CuitEmisor` son obligatorios. */
+/** Constatación (WSCDC). `cbteModo` y `cuitEmisor` son obligatorios. */
 export async function constatarComprobante(input: ConstatarInput) {
   const { data } = await api.post('/afip/constatar', input, { timeout: 60000 });
   return unwrap<ConstatarResult>(data);
@@ -258,12 +272,12 @@ export async function constatarComprobante(input: ConstatarInput) {
 
 export async function getCdcStatus() {
   const { data } = await api.get('/afip/cdc-status');
-  return unwrap<Record<string, string>>(data);
+  return unwrap<ServerStatus>(data);
 }
 
 export async function getCdcTiposCbte() {
   const { data } = await api.get('/afip/cdc-tipos-cbte');
-  return unwrap<{ Id: number; Desc: string }[]>(data);
+  return unwrap<{ id: number; desc: string }[]>(data);
 }
 
 export async function getAfipOptionalTypes() {
@@ -307,13 +321,16 @@ export type IdCtaCte =
 
 export async function getFecredStatus() {
   const { data } = await api.get('/afip/fecred-status');
-  return unwrap<Record<string, string>>(data);
+  return unwrap<ServerStatus>(data);
 }
 
-/** `fechaEmision` (YYYYMMDD o YYYY-MM-DD) es opcional: el backend usa hoy (Argentina). */
+/**
+ * `fechaEmision` (YYYYMMDD o YYYY-MM-DD) es opcional: el backend usa hoy (Argentina).
+ * `obligado` puede faltar si ARCA solo devolvió observaciones.
+ */
 export async function consultarFecredObligado(cuit: string, fechaEmision?: string) {
   const { data } = await api.get(`/afip/fecred-obligado/${cuit}`, { params: { fechaEmision } });
-  return unwrap<{ obligado: boolean; montoDesde?: number; observaciones: unknown[] }>(data);
+  return unwrap<{ obligado?: boolean; montoDesde?: number; observaciones: unknown[] }>(data);
 }
 
 /** Respuesta paginada: `{ ctasCtes, nroPagina?, hayMas?, evento?, observaciones }`. */
@@ -350,19 +367,23 @@ export async function rechazarFecred(params: {
 // MTXCA
 export async function getMtxcaStatus() {
   const { data } = await api.get('/afip/mtxca-status');
-  return unwrap<Record<string, string>>(data);
+  return unwrap<ServerStatus>(data);
 }
 
-/** ComprobanteType con los nombres del XSD. Un rechazo (resultado "R") responde 422. */
+/**
+ * ComprobanteType con los nombres del XSD (condicionIVAReceptor obligatoria). Un rechazo
+ * (resultado "R") responde 422. Con resultado A/O incluye `urlQR`.
+ */
 export async function autorizarMtxca(comprobante: Record<string, unknown>) {
   const { data } = await api.post('/afip/mtxca-autorizar', comprobante);
-  return unwrap<{ resultado: 'A' | 'O' | 'R'; comprobante?: Record<string, unknown>; errores?: unknown[] }>(data);
+  return unwrap<{ resultado: 'A' | 'O' | 'R'; comprobante?: Record<string, unknown>; errores?: unknown[]; urlQR?: string }>(data);
 }
 
 // SIRE (solo existen emitir, anular y status)
 export async function getSireStatus() {
   const { data } = await api.get('/afip/sire-status');
-  return unwrap<Record<string, string>>(data);
+  // headerInfo: ambiente, fecha y versiones del header SOAP de SIRE
+  return unwrap<ServerStatus & { headerInfo?: Record<string, string> }>(data);
 }
 
 export async function emitirCertificadoSire(params: Record<string, unknown>) {

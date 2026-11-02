@@ -41,7 +41,8 @@ const registros = [
     // "Ñ" es representable en ISO-8859-1 (0xD1): sirve para verificar la codificación.
     data: { cuil: '20-12345678-6', fechaInicio: '2026-11-02', modalidadContrato: 8, obraSocial: '126205', sucursal: 1, puesto: 'AÑO1' },
   },
-  { tipo: 'baja', data: { cuil: '20123456786', fechaFin: '2026-10-31' } },
+  // fechaInicio (inicio del vínculo) es obligatoria en todos los movimientos (arca-empleados 0.5)
+  { tipo: 'baja', data: { cuil: '20123456786', fechaInicio: '2020-03-01', fechaFin: '2026-10-31' } },
 ];
 
 function post(query: string, body: unknown) {
@@ -84,7 +85,9 @@ describe('POST /api/afip/empleados-generar', () => {
   });
 
   it('novedad acepta cualquier código de movimiento', async () => {
-    const res = await post('?formato=json', { registros: [{ tipo: 'novedad', data: { movimiento: 'NA', cuil: '20123456786' } }] });
+    const res = await post('?formato=json', {
+      registros: [{ tipo: 'novedad', data: { movimiento: 'NA', cuil: '20123456786', fechaInicio: '2020-03-01' } }],
+    });
     const body = await res.json();
     expect(res.status).toBe(200);
     expect(body.data.lineas[0].startsWith('01NA')).toBe(true);
@@ -96,6 +99,28 @@ describe('POST /api/afip/empleados-generar', () => {
     expect((await post('?formato=pdf', { registros })).status).toBe(400);
     // Los tipos eliminados de la API vieja ya no existen
     expect((await post('', { cuitEmpleador: '20123456786', registros: [{ tipo: 'datosComplementarios', data: {} }] })).status).toBe(400);
+  });
+
+  it('baja sin fechaInicio → 400 (obligatoria en todos los movimientos)', async () => {
+    const res = await post('', { registros: [{ tipo: 'baja', data: { cuil: '20123456786', fechaFin: '2026-10-31' } }] });
+    const body = await res.json();
+    expect(res.status).toBe(400);
+    expect(body.code).toBe('ARCA_VALIDATION_ERROR');
+    expect(body.error).toMatch(/fechaInicio/);
+  });
+
+  it('propiedad desconocida (typo) → 400 en lugar de un campo vacío', async () => {
+    const res = await post('', {
+      registros: [{ tipo: 'alta', data: { ...registros[0].data, obraSocal: '126205' } }],
+    });
+    expect(res.status).toBe(400);
+  });
+
+  it('fechaReferencia: un alta con fechaInicio a más de 90 días se rechaza; válida si la referencia es cercana', async () => {
+    const alta = { tipo: 'alta', data: { cuil: '20123456786', fechaInicio: '2027-06-01', modalidadContrato: 8, obraSocial: '126205', sucursal: 1 } };
+    expect((await post('', { registros: [alta], fechaReferencia: '2026-11-01' })).status).toBe(400);
+    expect((await post('', { registros: [alta], fechaReferencia: '2027-05-20' })).status).toBe(200);
+    expect((await post('', { registros: [alta], fechaReferencia: 'mañana' })).status).toBe(400);
   });
 
   it('datos inválidos para el SDK → ArcaValidationError → 400 con details', async () => {
