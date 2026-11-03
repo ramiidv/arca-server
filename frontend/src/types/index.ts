@@ -204,7 +204,7 @@ export interface ComprobanteAfip {
 
 export type CbteModo = 'CAE' | 'CAI' | 'CAEA';
 
-/** Input de `constatar` (WSCDC, arca-cdc 0.6) */
+/** Input de `constatar` (WSCDC, arca-cdc) */
 export interface ConstatarInput {
   cbteModo: CbteModo;
   cuitEmisor: string;
@@ -227,7 +227,8 @@ export interface ConstatarResult {
   /** Datos del comprobante constatado (puede faltar en un rechazo) */
   cmpResp?: Record<string, unknown>;
   observaciones: MensajeArca[];
-  events: MensajeArca[];
+  /** `Events` de ARCA */
+  eventos: MensajeArca[];
 }
 
 /** Persona del padrón A4 (campos usados por la UI) */

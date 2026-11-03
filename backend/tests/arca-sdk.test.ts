@@ -16,6 +16,7 @@ import {
   ArcaAuthError,
   ArcaTicketVigenteError,
   ArcaServiceError,
+  ArcaRechazoError,
   ArcaValidationError,
   ArcaWSFEError,
   ArcaSoapError,
@@ -173,7 +174,6 @@ describe('arca-facturacion: QR (generarUrlQR / urlQRDesdeFactura)', () => {
 
   it('urlQRDesdeFactura arma el QR desde un FacturaResult', () => {
     const factura = {
-      aprobada: true,
       cae: '73429843294823',
       caeVencimiento: '20261110',
       cbteNro: 150,
@@ -194,8 +194,8 @@ describe('arca-facturacion: QR (generarUrlQR / urlQRDesdeFactura)', () => {
     expect(p).toMatchObject({ cuit: CUIT, nroCmp: 150, importe: 121, tipoDocRec: 99, nroDocRec: 0 });
   });
 
-  it('no arma QR de un comprobante no aprobado', () => {
-    const factura = { aprobada: false, cbteNro: 1, ptoVta: 1, cbteTipo: 6 } as unknown as FacturaResult;
+  it('no arma QR de un comprobante sin CAE', () => {
+    const factura = { cbteNro: 1, ptoVta: 1, cbteTipo: 6 } as unknown as FacturaResult;
     expect(() => urlQRDesdeFactura(factura, { cuit: CUIT })).toThrow(ArcaValidationError);
   });
 });
@@ -363,7 +363,7 @@ describe('arca-facturacion: armarComprobante() y resultado incierto', () => {
 
   it('requiereRecuperacion distingue el 10016 por número del 10016 por fecha', () => {
     const rechazo = (msg: string) =>
-      ({ aprobada: false, observaciones: [{ code: 10016, msg }] }) as unknown as FacturaResult;
+      new ArcaRechazoError(msg, { operacion: 'FECAESolicitar', observaciones: [{ code: 10016, msg }] });
     expect(requiereRecuperacion(rechazo('El numero o fecha del comprobante no se corresponde con el proximo a autorizar'))).toBe(true);
     expect(requiereRecuperacion(rechazo('La fecha del comprobante (CbteFch) no se encuentra en el rango permitido'))).toBe(false);
   });
@@ -562,7 +562,6 @@ describe.skipIf(!canRunIntegration)('arca-facturacion: integración con ARCA hom
     const { intento } = arca.armarComprobante(opts);
     const result = await arca.facturar(opts);
 
-    expect(result.aprobada).toBe(true);
     expect(result.cae).toHaveLength(14);
     expect(result.cbteNro).toBe(cbteNro);
     expect(result.importes.total).toBe(1210);
@@ -586,14 +585,14 @@ describe.skipIf(!canRunIntegration)('arca-facturacion: integración con ARCA hom
       concepto: Concepto.PRODUCTOS,
       items: [{ neto: 100, iva: IvaTipo.IVA_21 }],
     });
-    expect(factura.aprobada).toBe(true);
+    expect(factura.cae).toHaveLength(14);
 
     const nc = await arca.notaCredito({
       ptoVta: 1,
       comprobanteOriginal: { tipo: CbteTipo.FACTURA_B, ptoVta: 1, nro: factura.cbteNro },
       items: [{ neto: 100, iva: IvaTipo.IVA_21 }],
     });
-    expect(nc.aprobada).toBe(true);
+    expect(nc.cae).toHaveLength(14);
     expect(nc.cbteTipo).toBe(CbteTipo.NOTA_CREDITO_B);
   });
 

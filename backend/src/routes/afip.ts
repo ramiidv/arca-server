@@ -212,7 +212,7 @@ router.get('/padron-status', async (_req: Request, res: Response, next: NextFunc
 // Body = ConstatarInput de arca-cdc (camelCase): cbteModo (CAE|CAI|CAEA), cuitEmisor, ptoVta,
 // cbteTipo, cbteNro, cbteFch, impTotal, codAutorizacion, docTipoReceptor?, docNroReceptor?,
 // opcionales?: [{ id, valor }]. Lo valida el SDK (ArcaValidationError → 400).
-// Devuelve { resultado, fchProceso, cmpResp?, observaciones, events }. Resultado "R" es un rechazo
+// Devuelve { resultado, fchProceso, cmpResp?, observaciones, eventos }. Resultado "R" es un rechazo
 // funcional (200 con observaciones; cmpResp puede faltar); los Errors de ARCA llegan como
 // ArcaServiceError (422) y una respuesta con forma inesperada como ArcaResponseError (502).
 router.post('/constatar', async (req: Request, res: Response, next: NextFunction) => {
@@ -286,7 +286,7 @@ router.get('/comprobante', async (req: Request, res: Response, next: NextFunctio
       return;
     }
 
-    // FECompConsultarResult (arca-facturacion 6): resultGet en camelCase con las listas ya
+    // FECompConsultarResult: resultGet en camelCase con las listas ya
     // como arrays; si ARCA las omite quedan undefined, acá se devuelven siempre como arrays.
     // Un comprobante inexistente es ArcaWSFEError 602 (422). Muchos campos son opcionales
     // (cbteFch, resultado, codAutorizacion, monId...): ARCA puede omitirlos.
@@ -621,6 +621,7 @@ router.post('/fecred-ctas-ctes', async (req: Request, res: Response, next: NextF
 
 // POST /fecred-aceptar - Accept an FCE
 // Body: { idCtaCte: { codCtaCte } | { idFactura }, saldoAceptado, codMoneda, cotizacionMonedaUlt, ...opcionales del XSD }
+// Un rechazo de ARCA (resultado "R") lanza ArcaRechazoError → 422 con errors y observaciones.
 router.post('/fecred-aceptar', async (req: Request, res: Response, next: NextFunction) => {
   try {
     const body = bodyObjeto(req, res);
@@ -632,6 +633,7 @@ router.post('/fecred-aceptar', async (req: Request, res: Response, next: NextFun
 
 // POST /fecred-rechazar - Reject an FCE
 // Body: { idCtaCte, motivos: [{ codMotivo, descMotivo, justificacion }] }
+// Un rechazo de ARCA (resultado "R") lanza ArcaRechazoError → 422 con errors y observaciones.
 router.post('/fecred-rechazar', async (req: Request, res: Response, next: NextFunction) => {
   try {
     const body = bodyObjeto(req, res);
@@ -655,20 +657,16 @@ router.get('/mtxca-status', async (_req: Request, res: Response, next: NextFunct
 
 // POST /mtxca-autorizar - Authorize invoice with item detail
 // Body = ComprobanteType con los nombres del XSD (codigoTipoComprobante, numeroPuntoVenta,
-// importeSubtotal, codigoMoneda, condicionIVAReceptor (obligatoria desde arca-mtxca 0.6),
+// importeSubtotal, codigoMoneda, condicionIVAReceptor (obligatoria),
 // items[], subtotalesIVA[], ...). El SDK redondea mitad al par (manual WSMTXCA) y valida las
-// reglas de FCE (fechaVencimientoPago en 201/206). Un rechazo NO lanza: devuelve resultado "R"
-// con errores → se responde 422. Si se autorizó, se agrega `urlQR` (RG 4892).
+// reglas de FCE (fechaVencimientoPago en 201/206). Un rechazo (resultado "R") lanza
+// ArcaRechazoError → 422 con errors y observaciones. Si se autorizó, se agrega `urlQR` (RG 4892).
 router.post('/mtxca-autorizar', async (req: Request, res: Response, next: NextFunction) => {
   try {
     const body = bodyObjeto(req, res);
     if (!body) return;
     const comprobante = body as unknown as Parameters<typeof mtxca.autorizar>[0];
     const result = await mtxca.autorizar(comprobante);
-    if (result.resultado === 'R') {
-      res.status(422).json({ success: false, error: 'ARCA rechazó el comprobante', data: result });
-      return;
-    }
     res.json({ success: true, data: { ...result, urlQR: qrMtxca(comprobante, result) } });
   } catch (error) { next(error); }
 });
@@ -719,8 +717,8 @@ router.get('/sire-status', async (_req: Request, res: Response, next: NextFuncti
 // importeComprobante, cuitRetenido, ... Lo valida el SDK, incluidas las reglas de fechas del manual
 // (fechaRetencion >= 2019-12-01, fechaComprobante <= fechaRetencion; iguales en los tipos 3, 19 y 20).
 // Devuelve { certificadoNro, codigoSeguridad }. Un Fault de token/sign es ArcaAuthError (503); un
-// Fault Client, ArcaSireServiceError (422). Ante un ArcaSoapError incierto no se reenvía: SIRE no
-// tiene consulta (verificar en el micrositio).
+// Fault Client, ArcaSireServiceError (un ArcaRechazoError: 422 con `operacion`). Ante un ArcaSoapError
+// incierto no se reenvía: SIRE no tiene consulta (verificar en el micrositio).
 const emitirCertificado = async (req: Request, res: Response, next: NextFunction) => {
   try {
     const body = bodyObjeto(req, res);

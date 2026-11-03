@@ -4,19 +4,19 @@ Sistema de facturación electrónica integrado con ARCA (ex AFIP, Argentina). Ba
 
 ## Stack
 
-- **Backend:** Node.js 20.19+ o 22.12+ (las imágenes Docker usan Node 22), Express 5.2, TypeScript 6, Prisma 7 (driver adapter), PostgreSQL, Zod 4
+- **Backend:** Node.js 22.12+ (las imágenes Docker usan Node 22), Express 5.2, TypeScript 6, Prisma 7 (driver adapter), PostgreSQL, Zod 4
 - **Frontend:** React 19.2, Vite 8, Tailwind CSS 4 (@tailwindcss/vite), React Hook Form 7
-- **Facturación:** [@ramiidv/arca-facturacion](https://www.npmjs.com/package/@ramiidv/arca-facturacion) ^6.2 — WSFEv1, QR y resultado incierto (`recuperarComprobante`). API en camelCase.
+- **Facturación:** [@ramiidv/arca-facturacion](https://www.npmjs.com/package/@ramiidv/arca-facturacion) ^7.0 — WSFEv1, QR y resultado incierto (`recuperarComprobante`). API en camelCase; los rechazos lanzan `ArcaRechazoError`.
   El SDK también soporta CAEA y exportación (WSFEX), pero el server no los expone: emite por WSFEv1 con CAE
   (Facturas, NC y ND A/B/C) y de WSFEX solo consulta el estado (`GET /api/afip/status`)
-- **Padrón:** [@ramiidv/arca-padron](https://www.npmjs.com/package/@ramiidv/arca-padron) ^0.8 — A4, A10, A13, A100, constancia, `condicionIvaDesdePadron`
-- **Constatación:** [@ramiidv/arca-cdc](https://www.npmjs.com/package/@ramiidv/arca-cdc) ^0.7 — WSCDC (camelCase)
-- **FECRED:** [@ramiidv/arca-fecred](https://www.npmjs.com/package/@ramiidv/arca-fecred) ^0.7 — Factura de Crédito Electrónica MiPyME
-- **MTXCA:** [@ramiidv/arca-mtxca](https://www.npmjs.com/package/@ramiidv/arca-mtxca) ^0.7 — Facturación con detalle de artículos
-- **SIRE:** [@ramiidv/arca-sire](https://www.npmjs.com/package/@ramiidv/arca-sire) ^0.6 — Certificados de retención de IVA (C2005)
-- **Agro:** [@ramiidv/arca-agro](https://www.npmjs.com/package/@ramiidv/arca-agro) ^0.7 — WSCPE (con derivados granarios) y WSLPG (liquidación primaria y secundaria). El server expone la autorización de la CPE automotor y de la liquidación primaria. WSCTG fue derogado
-- **Empleados:** [@ramiidv/arca-empleados](https://www.npmjs.com/package/@ramiidv/arca-empleados) ^0.5.1 — Ingreso masivo de relaciones laborales (TXT de ancho fijo, 130 posiciones)
-- **Common:** [@ramiidv/arca-common](https://www.npmjs.com/package/@ramiidv/arca-common) ^0.8 — WSAA (un `WsaaClient` compartido por todos los SDKs), `FileTicketStorage`, SOAP con fallback TLS legacy, validadores
+- **Padrón:** [@ramiidv/arca-padron](https://www.npmjs.com/package/@ramiidv/arca-padron) ^0.9 — A4, A10, A13, A100, constancia, `condicionIvaDesdePadron`
+- **Constatación:** [@ramiidv/arca-cdc](https://www.npmjs.com/package/@ramiidv/arca-cdc) ^0.8 — WSCDC (camelCase)
+- **FECRED:** [@ramiidv/arca-fecred](https://www.npmjs.com/package/@ramiidv/arca-fecred) ^0.8 — Factura de Crédito Electrónica MiPyME
+- **MTXCA:** [@ramiidv/arca-mtxca](https://www.npmjs.com/package/@ramiidv/arca-mtxca) ^0.8 — Facturación con detalle de artículos
+- **SIRE:** [@ramiidv/arca-sire](https://www.npmjs.com/package/@ramiidv/arca-sire) ^0.7 — Certificados de retención de IVA (C2005)
+- **Agro:** [@ramiidv/arca-agro](https://www.npmjs.com/package/@ramiidv/arca-agro) ^0.8 — WSCPE (con derivados granarios) y WSLPG (liquidación primaria y secundaria). El server expone la autorización de la CPE automotor y de la liquidación primaria. WSCTG fue derogado
+- **Empleados:** [@ramiidv/arca-empleados](https://www.npmjs.com/package/@ramiidv/arca-empleados) ^0.6 — Ingreso masivo de relaciones laborales (TXT de ancho fijo, 130 posiciones)
+- **Common:** [@ramiidv/arca-common](https://www.npmjs.com/package/@ramiidv/arca-common) ^0.9 — WSAA (un `WsaaClient` compartido por todos los SDKs), `FileTicketStorage`, SOAP con fallback TLS legacy, validadores
 - **Certificados:** [arca-cert](https://www.npmjs.com/package/arca-cert) — Generación automática de certificados de ARCA
 - **Infra:** Docker Compose, Nginx
 
@@ -122,8 +122,8 @@ Sistema de facturación electrónica integrado con ARCA (ex AFIP, Argentina). Ba
 
 ### Requisitos
 
-- Node.js `^20.19.0 || ^22.12.0 || >=24.0.0` (`engines` de los `package.json`; lo exigen Prisma 7, Vite 8 y los
-  SDKs, que se cargan con `require(esm)`). Las imágenes Docker usan Node 22
+- Node.js `^22.12.0 || >=24.0.0` (`engines` de los `package.json`; los SDKs requieren Node >= 22.12 y se cargan con
+  `require(esm)`). Las imágenes Docker usan Node 22
 - PostgreSQL 17+ (o Docker para levantar el del `docker-compose.yml`)
 - Certificado de ARCA (se puede generar desde la UI con clave fiscal)
 
@@ -250,7 +250,7 @@ también se publica en `127.0.0.1:3001` (solo desde la máquina host). Compose n
 | Alta de usuario por un admin, `GET /api/auth/me` | `{ "success": true, "user": { ... } }` |
 | API keys | `{ "success": true, "apiKeys": [...] }` (listado), `{ "success": true, "apiKey": { id, name, key, createdAt } }` (alta) |
 | Listados paginados (`GET /api/invoices`, `GET /api/clients`) | `{ "success": true, "data": [...], "pagination": { page, limit, total, totalPages } }`. Query `page` (entero ≥ 1, default 1) y `limit` (1 a 100, default 20); fuera de rango, 400 |
-| Error | `{ "success": false, "error": "<mensaje en español>", ... }` más, según el caso, `code`, `errors` (errores u observaciones de ARCA: `[{ code, msg }]`), `details` (por ejemplo, los issues de validación `[{ path, message }]`), `field`, `uncertain`, `soapFault` |
+| Error | `{ "success": false, "error": "<mensaje en español>", ... }` más, según el caso, `code`, `errors` (errores u observaciones de ARCA: `[{ code, msg }]`), `operacion` y `observaciones` (rechazos de MTXCA, FECRED y SIRE), `details` (por ejemplo, los issues de validación `[{ path, message }]`), `field`, `uncertain`, `soapFault` |
 
 **Códigos de error:**
 
@@ -262,7 +262,7 @@ también se publica en `127.0.0.1:3001` (solo desde la máquina host). Compose n
 | 404 | No existe el recurso (factura, cliente, CUIT en el padrón) |
 | 409 | Conflicto: email ya registrado, cliente con facturas, comprobante pendiente de recuperación del mismo tipo y punto de venta, generación de certificado en curso, dos registros simultáneos (reintentar) |
 | 413 | Body de más de 1 MB |
-| 422 | ARCA rechazó la operación (por ejemplo, `ArcaWSFEError` o factura con `aprobada: false`): ver `errors` |
+| 422 | ARCA rechazó la operación (`ArcaRechazoError`, `ArcaWSFEError`): ver `errors` y `observaciones` |
 | 429 | Rate limit |
 | 502 / 504 | ARCA no respondió bien o no respondió (puede venir `uncertain: true`: consultar antes de reintentar) |
 | 503 | Sin certificado instalado, o WSAA rechazó la autenticación (`ArcaAuthError`, `ArcaTicketVigenteError`) |
@@ -310,7 +310,7 @@ Sigue el flujo "Emisión segura" del README de arca-facturacion:
    punto de venta no se emite otra (409).
 3. Se envía:
    - **Aprobada** → `resultado = "A"`, CAE y QR.
-   - **Rechazada** → no se emitió: se borra el registro y se informa el error. `ArcaWSFEError` y `aprobada: false`
+   - **Rechazada** → no se emitió: se borra el registro y se informa el error. `ArcaWSFEError` y `ArcaRechazoError`
      responden 422 con los códigos de ARCA en `errors` (`[{ code, msg }]`) y en el mensaje
      (`ARCA rechazó el comprobante: 10048: ...`); `ArcaAuthError` (WSFE 600/601) responde 503.
    - **Incierta** (`ArcaResultadoIncierto`, o 10016 por número según `requiereRecuperacion`) → se espera
@@ -318,9 +318,11 @@ Sigue el flujo "Emisión segura" del README de arca-facturacion:
      - `autorizado` → aprobada con el CAE recuperado.
      - `no_emitido` → se reenvía **una vez** con las mismas opciones (mismo número y fecha). Es seguro
        según el README: si el intento original llegara a autorizarse, ARCA rechaza el duplicado (10016).
-       Si ARCA rechaza el reenvío (`ArcaWSFEError` salvo 6xx), con certeza no se emitió: se borra el
+       Si ARCA rechaza el reenvío (`ArcaRechazoError`, o `ArcaWSFEError` salvo 6xx), con certeza no se emitió: se borra el
        registro (libera el número) y responde 422. Si el reenvío falla sin evaluar el comprobante
        (`ArcaAuthError`, incluido el 600/601 que desde arca-facturacion 6.1 llega así, el 602, red), sigue `"P"`.
+     - Rechazado (`recuperarComprobante` lanza `ArcaRechazoError`: el número existe con los datos del intento pero
+       ARCA lo rechazó) → no se emitió: se borra el registro y responde 422.
      - `conflicto` → `resultado = "C"` (el número existe con otros datos): revisión manual. Lo encontrado se
        guarda en `emision.encontrado` en camelCase (`cbteFch`, `impTotal`, `docTipo`, `docNro`, `codAutorizacion`).
      - Sin certeza (no se pudo consultar ni reenviar) → sigue `"P"`; se reintenta con
@@ -339,8 +341,9 @@ Migración: `20261101120000_add_invoice_emision` agrega `Invoice.emision` (JSONB
 | `ArcaAuthError` | 503 | `retryable`, `faultCode`, `blocked` (WSAA bloqueó el servicio tras un error permanente: corregir y `POST /api/afip/wsaa-reset`). Incluye WSFE 600/601 (`faultCode: "600"`) |
 | `ArcaPadronServiceError` | 404 (`inexistente`, también "No existe persona" de la constancia), 422 (`inactiva`), 400 (`id_invalido`), 502 (`no_autorizado`) | `reason`, `errors` |
 | `ArcaAgroServiceError` con `uncertain` | 502 | `uncertain: true`, `errors`: hubo errores pero también resultado (CTG/COE): consultar antes de reintentar |
+| `ArcaRechazoError` (resultado "R" en MTXCA, FECRED y SIRE: `ArcaSireServiceError` es una subclase) | 422 | `code: "ARCA_RECHAZO"` (o el de la subclase), `operacion`, `errors` y `observaciones`; el mensaje lista los errores o, si no hay, las observaciones |
 | `ArcaWSFEError` (incluido 602) y otros `ArcaServiceError` | 422 | `errors` (`[{ code, msg }]`); el mensaje incluye los códigos (`ARCA rechazó la solicitud: 10015: ...`) |
-| Factura con `aprobada: false` (rechazo con observaciones) | 422 | `errors` y `details` con las observaciones de ARCA |
+| Factura rechazada (`ArcaRechazoError` de `facturar`/`notaCredito`/`notaDebito`) | 422 | `errors` y `details` con las observaciones de ARCA |
 | `ArcaSoapError` | 502 (504 si fue timeout sin respuesta) | `soapFault`, `uncertain`, `upstreamStatus` (no se exponen `responseBody` ni `faultDetail`) |
 | `ArcaResponseError` (incluye `ArcaAgroResponseError`) | 502 | `uncertain`: ARCA respondió con una forma inesperada |
 
@@ -376,24 +379,31 @@ Migración: `20261101120000_add_invoice_emision` agrega `Invoice.emision` (JSONB
 | GET | `/api/afip/optional-types` | Datos opcionales |
 | GET | `/api/afip/contribuyente-basic/:cuit` | Consulta padrón A10 (básico) |
 | GET | `/api/afip/padron-status` | Estado por servicio (a5, a4, a10, a13, a100): `{ ok, status }` o `{ ok: false, error, status? }` |
-| POST | `/api/afip/constatar` | Constatar comprobante via WSCDC. Body camelCase (`ConstatarInput` de arca-cdc): `cbteModo` (CAE/CAI/CAEA), `cuitEmisor`, `ptoVta`, `cbteTipo`, `cbteNro`, `cbteFch`, `impTotal`, `codAutorizacion`, `docTipoReceptor?`, `docNroReceptor?`, `opcionales?`. Devuelve `{ resultado, fchProceso, cmpResp?, observaciones, events }` |
+| POST | `/api/afip/constatar` | Constatar comprobante via WSCDC. Body camelCase (`ConstatarInput` de arca-cdc): `cbteModo` (CAE/CAI/CAEA), `cuitEmisor`, `ptoVta`, `cbteTipo`, `cbteNro`, `cbteFch`, `impTotal`, `codAutorizacion`, `docTipoReceptor?`, `docNroReceptor?`, `opcionales?`. Devuelve `{ resultado, fchProceso, cmpResp?, observaciones, eventos }` |
 | GET | `/api/afip/cdc-status` | Estado servicio WSCDC (`{ appserver, dbserver, authserver }`) |
 | GET | `/api/afip/cdc-tipos-cbte` | Tipos de comprobante WSCDC (`[{ id, desc }]`) |
 | GET | `/api/afip/fecred-status` | Estado WSFECRED |
 | GET | `/api/afip/fecred-obligado/:cuit` | ¿Obligado a recibir FCE? (query `fechaEmision`, default hoy en Argentina) |
 | POST | `/api/afip/fecred-ctas-ctes` | Cuentas corrientes FCE (`{ rol, cuitContraparte?, fecha? }`). Respuesta paginada `{ ctasCtes, nroPagina, hayMas }` |
-| POST | `/api/afip/fecred-aceptar` | Aceptar FCE (`{ idCtaCte, saldoAceptado, codMoneda, cotizacionMonedaUlt, ... }`) |
-| POST | `/api/afip/fecred-rechazar` | Rechazar FCE (`{ idCtaCte, motivos: [{ codMotivo, descMotivo, justificacion }] }`) |
+| POST | `/api/afip/fecred-aceptar` | Aceptar FCE (`{ idCtaCte, saldoAceptado, codMoneda, cotizacionMonedaUlt, ... }`). Resultado `R` → 422 (`ArcaRechazoError`) |
+| POST | `/api/afip/fecred-rechazar` | Rechazar FCE (`{ idCtaCte, motivos: [{ codMotivo, descMotivo, justificacion }] }`). Resultado `R` → 422 (`ArcaRechazoError`) |
 | GET | `/api/afip/mtxca-status` | Estado WSMTXCA |
-| POST | `/api/afip/mtxca-autorizar` | Autorizar con detalle de artículos (`ComprobanteType` del XSD; `condicionIVAReceptor` obligatoria). Resultado `R` → 422; aprobado incluye `urlQR` |
+| POST | `/api/afip/mtxca-autorizar` | Autorizar con detalle de artículos (`ComprobanteType` del XSD; `condicionIVAReceptor` obligatoria). Resultado `R` → 422 (`ArcaRechazoError`); aprobado incluye `urlQR` |
 | GET | `/api/afip/mtxca-ultimo-comprobante` | Último comprobante MTXCA: `{ cbteNro, ptoVta, cbteTipo }` |
 | GET | `/api/afip/sire-status` | Estado SIRE (incluye `headerInfo`: ambiente, fecha, versiones) |
-| POST | `/api/afip/sire-emitir` | Emitir certificado de retención (`emitirCertificado`). Alias: `/api/afip/sire-retencion` |
-| POST | `/api/afip/sire-anular` | Anular certificado (`{ numeroCertificado, motivoAnulacion, codigoTrazabilidad? }`) |
+| POST | `/api/afip/sire-emitir` | Emitir certificado de retención (`emitirCertificado`). Alias: `/api/afip/sire-retencion`. Un rechazo de SIRE → 422 (`ArcaSireServiceError`, con `operacion`) |
+| POST | `/api/afip/sire-anular` | Anular certificado (`{ numeroCertificado, motivoAnulacion, codigoTrazabilidad? }`). Un rechazo de SIRE → 422 (`ArcaSireServiceError`, con `operacion`) |
 | GET | `/api/afip/agro-status` | Estado de WSCPE y WSLPG: `{ cpe, lpg }` con `{ ok, status }` o `{ ok: false, error, status? }` |
 | POST | `/api/afip/agro-cpe-autorizar` | Autorizar Carta de Porte automotor (request según el XSD de WSCPE). El error 550 (PDF) vuelve en `advertencias` |
 | POST | `/api/afip/agro-lpg-autorizar` | Autorizar liquidación de granos (`{ liquidacion, deducciones?, retenciones?, percepciones? }`). El error 1021 (PDF) vuelve en `advertencias` |
 | POST | `/api/afip/empleados-generar` | Archivo de relaciones laborales (`{ registros: [{ tipo: alta\|baja\|modificacion\|novedad, data }], strict?, fechaReferencia? }`). `fechaInicio` obligatoria en todos los movimientos; propiedades desconocidas → 400. Con `?formato=txt` descarga el TXT (ISO-8859-1) |
+
+**Cambios de contrato (arca-facturacion 7 / arca-common 0.9, API uniforme de los SDKs):** los rechazos de ARCA
+(resultado "R") de `/mtxca-autorizar`, `/fecred-aceptar`, `/fecred-rechazar`, `/sire-emitir` y `/sire-anular`
+responden 422 con `code`, `operacion`, `errors` y `observaciones` (antes `/mtxca-autorizar` devolvía el resultado en
+`data` y `/fecred-*` respondía 200 con `resultado: "R"`); `/constatar` devuelve `eventos` (antes `events`); una
+factura pendiente que `recuperarComprobante` encuentra rechazada se borra y responde 422 (antes quedaba en conflicto,
+`C`); y el server requiere Node >= 22.12.
 
 **Cambios de comportamiento (arca-facturacion 6.2 / arca-common 0.8 y el resto de los SDKs):** los importes se
 redondean mitad al par (el criterio de los manuales de ARCA), también los que guarda el server por ítem; los SDKs
@@ -485,8 +495,8 @@ ARCA_INTEGRATION=1 AFIP_CUIT=20XXXXXXXXX npm test # + integración con ARCA homo
 - `tests/afip-routes.e2e.test.ts`: rutas `/api/afip` con los SDKs reales y ARCA simulado (`mockFetchWith` de
   `@ramiidv/arca-common/testing`): WSAA compartido, shapes camelCase, 600 → 503, bloqueo de WSAA y `/wsaa-reset`,
   `/config`, `/cert-info` y `/test-cert` con el ambiente activo, generar el certificado (se instala y no expone
-  rutas), el rechazo de generar/renovar certificados de otra CUIT, otro ambiente o sin rol admin, y 409 con una
-  generación en curso.
+  rutas), el rechazo de generar/renovar certificados de otra CUIT, otro ambiente o sin rol admin, 409 con una
+  generación en curso y un rechazo de FECRED (resultado R → 422 `ARCA_RECHAZO`).
 - `tests/arca-service.test.ts`: el server arranca sin certificados (SDKs lazy, 503 al usarlos).
 - `tests/auth.routes.test.ts`: registro cerrado (primer usuario admin con token, 403 sin credenciales o sin rol
   admin, alta por un admin sin token, `registration-status`, dos primeros registros simultáneos) y 403 en
@@ -495,10 +505,11 @@ ARCA_INTEGRATION=1 AFIP_CUIT=20XXXXXXXXX npm test # + integración con ARCA homo
 - `tests/listados.routes.test.ts`: `page`/`limit` y filtros de `GET /api/invoices` y `GET /api/clients` (400 si son
   inválidos o están fuera de rango).
 - `tests/config.test.ts`: parseo de `TRUST_PROXY`.
-- `tests/errorHandler.test.ts`: mapeo de cada error de los SDKs a HTTP, mensajes en español con los códigos de ARCA
-  y los campos de Zod, Prisma P2034 (409) y body inválido (400) o demasiado grande (413).
-- `tests/invoice.service.test.ts`: flujo incierto → recuperar con el SDK y Prisma mockeados, rechazo con
-  `aprobada: false` (422 con `errors`), concepto por defecto (1) y estadísticas del dashboard (mes y notas de crédito).
+- `tests/errorHandler.test.ts`: mapeo de cada error de los SDKs a HTTP (incluidos `ArcaRechazoError` y
+  `ArcaSireServiceError`), mensajes en español con los códigos de ARCA y los campos de Zod, Prisma P2034 (409) y body inválido (400) o demasiado grande (413).
+- `tests/invoice.service.test.ts`: flujo incierto → recuperar con el SDK y Prisma mockeados (incluido el 10016 por
+  número, como `ArcaRechazoError` o `ArcaWSFEError`), rechazo con `ArcaRechazoError` (422 con `errors` en el envío,
+  al recuperar y al reenviar), concepto por defecto (1) y estadísticas del dashboard (mes y notas de crédito).
 - `tests/afip-empleados.route.test.ts`: `/empleados-generar` con `?formato=txt`, `fechaInicio` y `fechaReferencia`.
 
 ## Licencia

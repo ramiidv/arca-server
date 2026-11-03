@@ -13,6 +13,6 @@
     "setup": "npm install && cd backend && npm install && cd ../frontend && npm install && cd ../backend && npx prisma generate"
   },
   "engines": {
-    "node": "^20.19.0 || ^22.12.0 || >=24.0.0"
+    "node": "^22.12.0 || >=24.0.0"
   }
 }

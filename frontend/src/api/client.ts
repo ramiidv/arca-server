@@ -407,6 +407,7 @@ export async function consultarFecredCtasCtes(params: {
   return unwrap<{ ctasCtes: Record<string, unknown>[]; nroPagina?: number; hayMas?: boolean; observaciones: unknown[] }>(data);
 }
 
+/** Un rechazo de ARCA (resultado "R") responde 422 con `operacion`, `errors` y `observaciones`. */
 export async function aceptarFecred(params: {
   idCtaCte: IdCtaCte;
   saldoAceptado: number;
@@ -415,15 +416,16 @@ export async function aceptarFecred(params: {
   [opcional: string]: unknown;
 }) {
   const { data } = await api.post('/afip/fecred-aceptar', params);
-  return unwrap<{ resultado: string; idCtaCte: unknown; observaciones: unknown[] }>(data);
+  return unwrap<{ resultado: 'A' | 'O'; idCtaCte: unknown; observaciones: unknown[] }>(data);
 }
 
+/** Un rechazo de ARCA (resultado "R") responde 422 con `operacion`, `errors` y `observaciones`. */
 export async function rechazarFecred(params: {
   idCtaCte: IdCtaCte;
   motivos: { codMotivo: number; descMotivo: string; justificacion: string }[];
 }) {
   const { data } = await api.post('/afip/fecred-rechazar', params);
-  return unwrap<{ resultado: string; idCtaCte: unknown; observaciones: unknown[] }>(data);
+  return unwrap<{ resultado: 'A' | 'O'; idCtaCte: unknown; observaciones: unknown[] }>(data);
 }
 
 // MTXCA
@@ -434,11 +436,11 @@ export async function getMtxcaStatus() {
 
 /**
  * ComprobanteType con los nombres del XSD (condicionIVAReceptor obligatoria). Un rechazo
- * (resultado "R") responde 422. Con resultado A/O incluye `urlQR`.
+ * (resultado "R") responde 422 con `operacion`, `errors` y `observaciones`. Autorizado (A/O) incluye `urlQR`.
  */
 export async function autorizarMtxca(comprobante: Record<string, unknown>) {
   const { data } = await api.post('/afip/mtxca-autorizar', comprobante);
-  return unwrap<{ resultado: 'A' | 'O' | 'R'; comprobante?: Record<string, unknown>; errores?: unknown[]; urlQR?: string }>(data);
+  return unwrap<{ resultado: 'A' | 'O'; comprobante: Record<string, unknown>; observaciones: unknown[]; urlQR?: string }>(data);
 }
 
 // SIRE (solo existen emitir, anular y status)
