@@ -250,7 +250,7 @@ también se publica en `127.0.0.1:3001` (solo desde la máquina host). Compose n
 | Alta de usuario por un admin, `GET /api/auth/me` | `{ "success": true, "user": { ... } }` |
 | API keys | `{ "success": true, "apiKeys": [...] }` (listado), `{ "success": true, "apiKey": { id, name, key, createdAt } }` (alta) |
 | Listados paginados (`GET /api/invoices`, `GET /api/clients`) | `{ "success": true, "data": [...], "pagination": { page, limit, total, totalPages } }`. Query `page` (entero ≥ 1, default 1) y `limit` (1 a 100, default 20); fuera de rango, 400 |
-| Error | `{ "success": false, "error": "<mensaje en español>", ... }` más, según el caso, `code`, `errors` (errores u observaciones de ARCA: `[{ code, msg }]`), `details` (por ejemplo, los issues de validación `[{ path, message }]`), `field`, `uncertain`, `soapFault` |
+| Error | `{ "success": false, "error": "<mensaje en español>", ... }` más, según el caso, `code`, `errors` (errores u observaciones de ARCA: `[{ code, msg }]`), `operacion` y `observaciones` (rechazos de MTXCA, FECRED y SIRE), `details` (por ejemplo, los issues de validación `[{ path, message }]`), `field`, `uncertain`, `soapFault` |
 
 **Códigos de error:**
 
@@ -391,8 +391,8 @@ Migración: `20261101120000_add_invoice_emision` agrega `Invoice.emision` (JSONB
 | POST | `/api/afip/mtxca-autorizar` | Autorizar con detalle de artículos (`ComprobanteType` del XSD; `condicionIVAReceptor` obligatoria). Resultado `R` → 422 (`ArcaRechazoError`); aprobado incluye `urlQR` |
 | GET | `/api/afip/mtxca-ultimo-comprobante` | Último comprobante MTXCA: `{ cbteNro, ptoVta, cbteTipo }` |
 | GET | `/api/afip/sire-status` | Estado SIRE (incluye `headerInfo`: ambiente, fecha, versiones) |
-| POST | `/api/afip/sire-emitir` | Emitir certificado de retención (`emitirCertificado`). Alias: `/api/afip/sire-retencion` |
-| POST | `/api/afip/sire-anular` | Anular certificado (`{ numeroCertificado, motivoAnulacion, codigoTrazabilidad? }`) |
+| POST | `/api/afip/sire-emitir` | Emitir certificado de retención (`emitirCertificado`). Alias: `/api/afip/sire-retencion`. Un rechazo de SIRE → 422 (`ArcaSireServiceError`, con `operacion`) |
+| POST | `/api/afip/sire-anular` | Anular certificado (`{ numeroCertificado, motivoAnulacion, codigoTrazabilidad? }`). Un rechazo de SIRE → 422 (`ArcaSireServiceError`, con `operacion`) |
 | GET | `/api/afip/agro-status` | Estado de WSCPE y WSLPG: `{ cpe, lpg }` con `{ ok, status }` o `{ ok: false, error, status? }` |
 | POST | `/api/afip/agro-cpe-autorizar` | Autorizar Carta de Porte automotor (request según el XSD de WSCPE). El error 550 (PDF) vuelve en `advertencias` |
 | POST | `/api/afip/agro-lpg-autorizar` | Autorizar liquidación de granos (`{ liquidacion, deducciones?, retenciones?, percepciones? }`). El error 1021 (PDF) vuelve en `advertencias` |
@@ -401,8 +401,9 @@ Migración: `20261101120000_add_invoice_emision` agrega `Invoice.emision` (JSONB
 **Cambios de contrato (arca-facturacion 7 / arca-common 0.9, API uniforme de los SDKs):** los rechazos de ARCA
 (resultado "R") de `/mtxca-autorizar`, `/fecred-aceptar`, `/fecred-rechazar`, `/sire-emitir` y `/sire-anular`
 responden 422 con `code`, `operacion`, `errors` y `observaciones` (antes `/mtxca-autorizar` devolvía el resultado en
-`data` y `/fecred-*` respondía 200 con `resultado: "R"`); `/constatar` devuelve `eventos` (antes `events`); y el
-server requiere Node >= 22.12.
+`data` y `/fecred-*` respondía 200 con `resultado: "R"`); `/constatar` devuelve `eventos` (antes `events`); una
+factura pendiente que `recuperarComprobante` encuentra rechazada se borra y responde 422 (antes quedaba en conflicto,
+`C`); y el server requiere Node >= 22.12.
 
 **Cambios de comportamiento (arca-facturacion 6.2 / arca-common 0.8 y el resto de los SDKs):** los importes se
 redondean mitad al par (el criterio de los manuales de ARCA), también los que guarda el server por ítem; los SDKs
@@ -504,10 +505,11 @@ ARCA_INTEGRATION=1 AFIP_CUIT=20XXXXXXXXX npm test # + integración con ARCA homo
 - `tests/listados.routes.test.ts`: `page`/`limit` y filtros de `GET /api/invoices` y `GET /api/clients` (400 si son
   inválidos o están fuera de rango).
 - `tests/config.test.ts`: parseo de `TRUST_PROXY`.
-- `tests/errorHandler.test.ts`: mapeo de cada error de los SDKs a HTTP, mensajes en español con los códigos de ARCA
-  y los campos de Zod, Prisma P2034 (409) y body inválido (400) o demasiado grande (413).
-- `tests/invoice.service.test.ts`: flujo incierto → recuperar con el SDK y Prisma mockeados, rechazo con
-  `ArcaRechazoError` (422 con `errors`, también si `recuperarComprobante` lo encuentra rechazado), concepto por defecto (1) y estadísticas del dashboard (mes y notas de crédito).
+- `tests/errorHandler.test.ts`: mapeo de cada error de los SDKs a HTTP (incluidos `ArcaRechazoError` y
+  `ArcaSireServiceError`), mensajes en español con los códigos de ARCA y los campos de Zod, Prisma P2034 (409) y body inválido (400) o demasiado grande (413).
+- `tests/invoice.service.test.ts`: flujo incierto → recuperar con el SDK y Prisma mockeados (incluido el 10016 por
+  número, como `ArcaRechazoError` o `ArcaWSFEError`), rechazo con `ArcaRechazoError` (422 con `errors` en el envío,
+  al recuperar y al reenviar), concepto por defecto (1) y estadísticas del dashboard (mes y notas de crédito).
 - `tests/afip-empleados.route.test.ts`: `/empleados-generar` con `?formato=txt`, `fechaInicio` y `fechaReferencia`.
 
 ## Licencia
