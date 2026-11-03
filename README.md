@@ -6,17 +6,17 @@ Sistema de facturación electrónica integrado con ARCA (ex AFIP, Argentina). Ba
 
 - **Backend:** Node.js 20.19+ o 22.12+ (las imágenes Docker usan Node 22), Express 5.2, TypeScript 6, Prisma 7 (driver adapter), PostgreSQL, Zod 4
 - **Frontend:** React 19.2, Vite 8, Tailwind CSS 4 (@tailwindcss/vite), React Hook Form 7
-- **Facturación:** [@ramiidv/arca-facturacion](https://www.npmjs.com/package/@ramiidv/arca-facturacion) ^6.1 — WSFEv1, QR y resultado incierto (`recuperarComprobante`). API en camelCase.
+- **Facturación:** [@ramiidv/arca-facturacion](https://www.npmjs.com/package/@ramiidv/arca-facturacion) ^6.2 — WSFEv1, QR y resultado incierto (`recuperarComprobante`). API en camelCase.
   El SDK también soporta CAEA y exportación (WSFEX), pero el server no los expone: emite por WSFEv1 con CAE
   (Facturas, NC y ND A/B/C) y de WSFEX solo consulta el estado (`GET /api/afip/status`)
-- **Padrón:** [@ramiidv/arca-padron](https://www.npmjs.com/package/@ramiidv/arca-padron) ^0.7 — A4, A10, A13, A100, constancia, `condicionIvaDesdePadron`
-- **Constatación:** [@ramiidv/arca-cdc](https://www.npmjs.com/package/@ramiidv/arca-cdc) ^0.6 — WSCDC (camelCase)
-- **FECRED:** [@ramiidv/arca-fecred](https://www.npmjs.com/package/@ramiidv/arca-fecred) ^0.6 — Factura de Crédito Electrónica MiPyME
-- **MTXCA:** [@ramiidv/arca-mtxca](https://www.npmjs.com/package/@ramiidv/arca-mtxca) ^0.6 — Facturación con detalle de artículos
-- **SIRE:** [@ramiidv/arca-sire](https://www.npmjs.com/package/@ramiidv/arca-sire) ^0.5 — Certificados de retención de IVA (C2005)
-- **Agro:** [@ramiidv/arca-agro](https://www.npmjs.com/package/@ramiidv/arca-agro) ^0.6 — WSCPE y WSLPG (WSCTG fue derogado)
-- **Empleados:** [@ramiidv/arca-empleados](https://www.npmjs.com/package/@ramiidv/arca-empleados) ^0.5 — Ingreso masivo de relaciones laborales (TXT de ancho fijo, 130 posiciones)
-- **Common:** [@ramiidv/arca-common](https://www.npmjs.com/package/@ramiidv/arca-common) ^0.7 — WSAA (un `WsaaClient` compartido por todos los SDKs), `FileTicketStorage`, SOAP con fallback TLS legacy, validadores
+- **Padrón:** [@ramiidv/arca-padron](https://www.npmjs.com/package/@ramiidv/arca-padron) ^0.8 — A4, A10, A13, A100, constancia, `condicionIvaDesdePadron`
+- **Constatación:** [@ramiidv/arca-cdc](https://www.npmjs.com/package/@ramiidv/arca-cdc) ^0.7 — WSCDC (camelCase)
+- **FECRED:** [@ramiidv/arca-fecred](https://www.npmjs.com/package/@ramiidv/arca-fecred) ^0.7 — Factura de Crédito Electrónica MiPyME
+- **MTXCA:** [@ramiidv/arca-mtxca](https://www.npmjs.com/package/@ramiidv/arca-mtxca) ^0.7 — Facturación con detalle de artículos
+- **SIRE:** [@ramiidv/arca-sire](https://www.npmjs.com/package/@ramiidv/arca-sire) ^0.6 — Certificados de retención de IVA (C2005)
+- **Agro:** [@ramiidv/arca-agro](https://www.npmjs.com/package/@ramiidv/arca-agro) ^0.7 — WSCPE (con derivados granarios) y WSLPG (liquidación primaria y secundaria). El server expone la autorización de la CPE automotor y de la liquidación primaria. WSCTG fue derogado
+- **Empleados:** [@ramiidv/arca-empleados](https://www.npmjs.com/package/@ramiidv/arca-empleados) ^0.5.1 — Ingreso masivo de relaciones laborales (TXT de ancho fijo, 130 posiciones)
+- **Common:** [@ramiidv/arca-common](https://www.npmjs.com/package/@ramiidv/arca-common) ^0.8 — WSAA (un `WsaaClient` compartido por todos los SDKs), `FileTicketStorage`, SOAP con fallback TLS legacy, validadores
 - **Certificados:** [arca-cert](https://www.npmjs.com/package/arca-cert) — Generación automática de certificados de ARCA
 - **Infra:** Docker Compose, Nginx
 
@@ -335,7 +335,7 @@ Migración: `20261101120000_add_invoice_emision` agrega `Invoice.emision` (JSONB
 | `ArcaValidationError` | 400 | `field`, `details` (no se envió nada a ARCA) |
 | `ArcaResultadoIncierto` / `ArcaResultadoInciertoExpo` | 502 | `uncertain: true`, `recuperacion` (intento / Id) |
 | `ArcaConflictoExpo` | 409 | `details: { id, enviado, respuesta }`: el `Id` de WSFEX ya lo usaba otra solicitud; el comprobante no se autorizó |
-| `ArcaTicketVigenteError` | 503 | `service` |
+| `ArcaTicketVigenteError` | 503 | `service`, `retryable: true`, `retryAfterMs?` y header `Retry-After` (WSAA rechaza los pedidos repetidos durante unos minutos) |
 | `ArcaAuthError` | 503 | `retryable`, `faultCode`, `blocked` (WSAA bloqueó el servicio tras un error permanente: corregir y `POST /api/afip/wsaa-reset`). Incluye WSFE 600/601 (`faultCode: "600"`) |
 | `ArcaPadronServiceError` | 404 (`inexistente`, también "No existe persona" de la constancia), 422 (`inactiva`), 400 (`id_invalido`), 502 (`no_autorizado`) | `reason`, `errors` |
 | `ArcaAgroServiceError` con `uncertain` | 502 | `uncertain: true`, `errors`: hubo errores pero también resultado (CTG/COE): consultar antes de reintentar |
@@ -394,6 +394,12 @@ Migración: `20261101120000_add_invoice_emision` agrega `Invoice.emision` (JSONB
 | POST | `/api/afip/agro-cpe-autorizar` | Autorizar Carta de Porte automotor (request según el XSD de WSCPE). El error 550 (PDF) vuelve en `advertencias` |
 | POST | `/api/afip/agro-lpg-autorizar` | Autorizar liquidación de granos (`{ liquidacion, deducciones?, retenciones?, percepciones? }`). El error 1021 (PDF) vuelve en `advertencias` |
 | POST | `/api/afip/empleados-generar` | Archivo de relaciones laborales (`{ registros: [{ tipo: alta\|baja\|modificacion\|novedad, data }], strict?, fechaReferencia? }`). `fechaInicio` obligatoria en todos los movimientos; propiedades desconocidas → 400. Con `?formato=txt` descarga el TXT (ISO-8859-1) |
+
+**Cambios de comportamiento (arca-facturacion 6.2 / arca-common 0.8 y el resto de los SDKs):** los importes se
+redondean mitad al par (el criterio de los manuales de ARCA), también los que guarda el server por ítem; los SDKs
+validan localmente más reglas de los manuales vigentes, así que algunos requests que antes llegaban a ARCA ahora
+responden 400 (`ArcaValidationError`, con el código de la validación); y `ArcaTicketVigenteError` responde 503 con
+`Retry-After`, porque WSAA solo rechaza los pedidos repetidos durante unos minutos.
 
 **Cambio de contrato (arca-facturacion 6.1 / arca-common 0.7):** las respuestas de `/api/afip/*` usan los nombres
 camelCase de los SDKs. Cambiaron `/status` (antes `{ AppServer, DbServer, AuthServer }`), `/comprobante`,

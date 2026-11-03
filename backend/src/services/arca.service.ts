@@ -63,10 +63,11 @@ function readCerts() {
 }
 
 /**
- * Storage de Tickets de Acceso compartido por todos los SDKs. WSAA rechaza un
- * login nuevo mientras exista un TA vigente para el mismo certificado y
- * servicio: sin persistirlo, cada reinicio del server terminaría en
- * `ArcaTicketVigenteError` hasta que venza el ticket anterior (hasta 12 h).
+ * Storage de Tickets de Acceso compartido por todos los SDKs. WSAA rechaza los
+ * pedidos repetidos de un TA para el mismo certificado y servicio durante un
+ * lapso de retención (según el manual de WSAA, 2 minutos en producción y 10 en
+ * homologación): sin persistirlo, cada reinicio del server terminaría en
+ * `ArcaTicketVigenteError` durante ese lapso.
  * Las keys incluyen entorno + certificado + servicio, así que un mismo
  * directorio sirve para todos los servicios y para homologación/producción.
  */
@@ -139,7 +140,7 @@ export function resetWsaaCooldown(): boolean {
  * Prueba el certificado instalado pidiendo un Ticket de Acceso de `wsfe` a WSAA
  * con el WsaaClient del SDK, así el ticket queda en el mismo `ticketStorage`
  * que usan los SDKs (un ticket obtenido por fuera haría que el próximo login
- * del SDK falle con `ArcaTicketVigenteError` hasta que venza). Si el entorno
+ * del SDK falle con `ArcaTicketVigenteError` durante el lapso de retención). Si el entorno
  * pedido es el de los SDKs se usa su WsaaClient; si no, uno temporal.
  */
 export async function probarCertificado(production: boolean) {

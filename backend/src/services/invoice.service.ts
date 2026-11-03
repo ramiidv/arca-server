@@ -21,7 +21,7 @@ import type {
   IntentoComprobante,
   MensajeArca,
 } from '@ramiidv/arca-facturacion';
-import { formatDate } from '@ramiidv/arca-common';
+import { formatDate, roundHalfEven } from '@ramiidv/arca-common';
 import { prisma } from '../lib/prisma';
 import { arca } from './arca.service';
 import { config } from '../config';
@@ -112,8 +112,9 @@ type Desenlace =
   | { tipo: 'conflicto'; motivo: string; encontrado: Record<string, unknown> }
   | { tipo: 'rechazada'; motivo: string; observaciones: MensajeArca[] };
 
+/** Redondeo a 2 decimales mitad al par, el mismo criterio que usan los SDKs (manual de WSFEv1). */
 function roundTwo(n: number): number {
-  return Math.round(n * 100) / 100;
+  return roundHalfEven(n, 2);
 }
 
 function processItemsForDB(items: InvoiceItemInput[]) {
