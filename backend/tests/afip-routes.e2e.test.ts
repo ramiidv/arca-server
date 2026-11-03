@@ -257,6 +257,18 @@ describe('WSFEv1 con login WSAA (camelCase)', () => {
     expect(body.data).toEqual([{ nro: 3, emisionTipo: 'CAE - Ws', bloqueado: 'N', fchBaja: 'NULL' }]);
   });
 
+  it('GET /puntos-venta sin puntos de venta (WSFE 602 "Sin Resultados", como en homologación) → 200 con []', async () => {
+    handlers.FEParamGetPtosVenta = () =>
+      asmx(
+        WSFE_NS,
+        'FEParamGetPtosVenta',
+        '<Errors><Err><Code>602</Code><Msg>Sin Resultados: - Metodo FEParamGetPtosVenta</Msg></Err></Errors>',
+      );
+    const { status, body } = await api('/puntos-venta');
+    expect(status).toBe(200);
+    expect(body.data).toEqual([]);
+  });
+
   it('WSFE 600 → ArcaAuthError → 503 con faultCode 600, no reintentable y sin bloqueo de WSAA', async () => {
     handlers.FECompUltimoAutorizado = () =>
       asmx(

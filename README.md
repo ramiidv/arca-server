@@ -367,7 +367,7 @@ Migración: `20261101120000_add_invoice_emision` agrega `Invoice.emision` (JSONB
 | GET | `/api/afip/contribuyente/:cuit` | Consulta padrón A4 (incluye `metadata`) + `condicionIvaSugerida` |
 | GET | `/api/afip/comprobante` | Consultar comprobante (query: puntoVenta, cbteTipo, cbteNro). `resultGet` del SDK en camelCase (`cbteFch`, `impTotal`, `codAutorizacion`...) con `iva`, `tributos`, `cbtesAsoc`, `opcionales`, `observaciones` y `events` siempre como arrays |
 | GET | `/api/afip/cotizacion` | Cotización (query: monedaId, fecha opcional). Devuelve `{ monId, monCotiz, fchCotiz }` |
-| GET | `/api/afip/puntos-venta` | Puntos de venta habilitados: `[{ nro, emisionTipo?, bloqueado?, fchBaja? }]` |
+| GET | `/api/afip/puntos-venta` | Puntos de venta habilitados: `[{ nro, emisionTipo?, bloqueado?, fchBaja? }]`; `[]` si la CUIT no tiene ninguno (en homologación suele pasar: la UI muestra un campo numérico) |
 | GET | `/api/afip/last-voucher` | Último comprobante (query: puntoVenta, cbteTipo): `{ cbteNro, ptoVta, cbteTipo }` |
 | GET | `/api/afip/invoice-types` | Tipos de comprobante. Las tablas de parámetros devuelven `[{ id, desc, fchDesde?, fchHasta? }]` (condiciones de IVA: `{ id, desc, cmpClase? }`) |
 | GET | `/api/afip/doc-types` | Tipos de documento |
@@ -397,6 +397,12 @@ Migración: `20261101120000_add_invoice_emision` agrega `Invoice.emision` (JSONB
 | POST | `/api/afip/agro-cpe-autorizar` | Autorizar Carta de Porte automotor (request según el XSD de WSCPE). El error 550 (PDF) vuelve en `advertencias` |
 | POST | `/api/afip/agro-lpg-autorizar` | Autorizar liquidación de granos (`{ liquidacion, deducciones?, retenciones?, percepciones? }`). El error 1021 (PDF) vuelve en `advertencias` |
 | POST | `/api/afip/empleados-generar` | Archivo de relaciones laborales (`{ registros: [{ tipo: alta\|baja\|modificacion\|novedad, data }], strict?, fechaReferencia? }`). `fechaInicio` obligatoria en todos los movimientos; propiedades desconocidas → 400. Con `?formato=txt` descarga el TXT (ISO-8859-1) |
+
+**Cambios de comportamiento (arca-facturacion 7.0.1, arca-common 0.9.1 y parches de cdc, mtxca, sire y agro):**
+`/puntos-venta` sin puntos de venta responde 200 con `[]` (antes 422 con el error 602 de ARCA); `/mtxca-autorizar`
+acepta las alícuotas 5% (8) y 2,5% (9) y ya no rechaza localmente un No Categorizado con otro tributo y sin el 13
+(ARCA lo observa con 150), pero sí un período de asociados en la Factura B (162); y en `/sire-emitir` y `/sire-anular`
+los faults `BAD_SERVICE` y `CANT_VERIFY_DATA` responden 503 (`ArcaAuthError`) en lugar de 502 incierto.
 
 **Cambios de contrato (arca-facturacion 7 / arca-common 0.9, API uniforme de los SDKs):** los rechazos de ARCA
 (resultado "R") de `/mtxca-autorizar`, `/fecred-aceptar`, `/fecred-rechazar`, `/sire-emitir` y `/sire-anular`
@@ -496,7 +502,8 @@ ARCA_INTEGRATION=1 AFIP_CUIT=20XXXXXXXXX npm test # + integración con ARCA homo
   `@ramiidv/arca-common/testing`): WSAA compartido, shapes camelCase, 600 → 503, bloqueo de WSAA y `/wsaa-reset`,
   `/config`, `/cert-info` y `/test-cert` con el ambiente activo, generar el certificado (se instala y no expone
   rutas), el rechazo de generar/renovar certificados de otra CUIT, otro ambiente o sin rol admin, 409 con una
-  generación en curso y un rechazo de FECRED (resultado R → 422 `ARCA_RECHAZO`).
+  generación en curso, un rechazo de FECRED (resultado R → 422 `ARCA_RECHAZO`) y `/puntos-venta` sin puntos de venta
+  (602 de ARCA → `[]`).
 - `tests/arca-service.test.ts`: el server arranca sin certificados (SDKs lazy, 503 al usarlos).
 - `tests/auth.routes.test.ts`: registro cerrado (primer usuario admin con token, 403 sin credenciales o sin rol
   admin, alta por un admin sin token, `registration-status`, dos primeros registros simultáneos) y 403 en
