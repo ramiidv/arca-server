@@ -1,3 +1,4 @@
+import { useEffect, useState } from 'react';
 import { NavLink } from 'react-router-dom';
 import {
   HomeIcon,
@@ -13,6 +14,10 @@ import {
   MagnifyingGlassCircleIcon,
   TableCellsIcon,
 } from '@heroicons/react/24/outline';
+import { getArcaConfig } from '../api/client';
+import { getApiErrorMessage } from '../utils/errors';
+import { NOMBRE_AMBIENTE } from '../types';
+import type { ArcaConfig } from '../types';
 
 interface SidebarProps {
   open: boolean;
@@ -42,7 +47,7 @@ const navSections = [
     ],
   },
   {
-    label: 'AFIP',
+    label: 'ARCA',
     items: [
       { name: 'Consultar Cbte.', href: '/consulta', icon: MagnifyingGlassCircleIcon },
       { name: 'Parámetros', href: '/parametros', icon: TableCellsIcon },
@@ -58,6 +63,26 @@ const navSections = [
 ];
 
 export default function Sidebar({ open, onClose }: SidebarProps) {
+  // Ambiente activo del server (AFIP_PRODUCTION), no un valor fijo.
+  const [arcaConfig, setArcaConfig] = useState<ArcaConfig | null>(null);
+  const [errorConfig, setErrorConfig] = useState<string | null>(null);
+  useEffect(() => {
+    let vigente = true;
+    getArcaConfig()
+      .then((cfg) => vigente && setArcaConfig(cfg))
+      .catch((err) => vigente && setErrorConfig(getApiErrorMessage(err, 'No se pudo obtener el ambiente de ARCA')));
+    return () => {
+      vigente = false;
+    };
+  }, []);
+
+  const ambiente = arcaConfig
+    ? {
+        texto: `ARCA ${NOMBRE_AMBIENTE[arcaConfig.environment]}`,
+        punto: arcaConfig.environment === 'production' ? 'bg-emerald-400 shadow-emerald-400/50' : 'bg-amber-400 shadow-amber-400/50',
+      }
+    : { texto: errorConfig ? 'Ambiente desconocido' : 'Cargando ambiente...', punto: 'bg-gray-500 shadow-gray-500/50' };
+
   return (
     <>
       {/* Mobile overlay */}
@@ -138,11 +163,13 @@ export default function Sidebar({ open, onClose }: SidebarProps) {
 
         {/* Footer */}
         <div className="border-t border-white/5 px-5 py-4">
-          <div className="flex items-center gap-2">
-            <div className="h-1.5 w-1.5 rounded-full bg-emerald-400 shadow-sm shadow-emerald-400/50" />
-            <p className="text-[11px] font-medium text-indigo-400">AFIP Homologación</p>
+          <div className="flex items-center gap-2" title={errorConfig ?? 'Ambiente de ARCA configurado en el server (AFIP_PRODUCTION)'}>
+            <div className={`h-1.5 w-1.5 rounded-full shadow-sm ${ambiente.punto}`} aria-hidden="true" />
+            <p className="text-[11px] font-medium text-indigo-400">{ambiente.texto}</p>
           </div>
-          <p className="mt-1 text-[10px] text-indigo-600">v2.0.0 — arca-sdk v1.1.4</p>
+          {arcaConfig?.cuit && (
+            <p className="mt-1 font-mono text-[10px] text-indigo-600">CUIT {arcaConfig.cuit}</p>
+          )}
         </div>
       </aside>
     </>

@@ -84,7 +84,7 @@ export default function AfipParams() {
       }
       setData((prev) => ({ ...prev, [tab]: Array.isArray(result) ? result : [] }));
     } catch (err) {
-      toast.error(getApiErrorMessage(err, 'Error cargando datos de AFIP'), { duration: 8000 });
+      toast.error(getApiErrorMessage(err, 'Error cargando datos de ARCA'), { duration: 8000 });
     } finally {
       setLoading((prev) => ({ ...prev, [tab]: false }));
     }
@@ -140,7 +140,7 @@ export default function AfipParams() {
             <div className="h-6 w-6 animate-spin rounded-full border-[3px] border-indigo-600 border-t-transparent" />
           </div>
         ) : items.length === 0 ? (
-          <p className="py-8 text-center text-sm text-gray-400">Sin datos. Conectá los certificados AFIP para cargar.</p>
+          <p className="py-8 text-center text-sm text-gray-400">Sin datos. Instalá el certificado de ARCA (Configuración) para cargarlos.</p>
         ) : (
           <div className="overflow-x-auto">
             <table className="w-full">
@@ -192,7 +192,7 @@ export default function AfipParams() {
         <div className="card border-indigo-200 bg-indigo-50/50">
           <div className="flex items-center justify-between">
             <div>
-              <p className="text-xs text-indigo-600">Cotización Oficial AFIP ({cotizacion.monId})</p>
+              <p className="text-xs text-indigo-600">Cotización Oficial ARCA ({cotizacion.monId})</p>
               <p className="mt-0.5 text-2xl font-bold text-indigo-900">
                 ${cotizacion.monCotiz}
               </p>

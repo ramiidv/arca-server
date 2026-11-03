@@ -1,6 +1,7 @@
 import { useState, useEffect, useCallback } from 'react';
 import toast from 'react-hot-toast';
 import api from '../api/client';
+import { getApiErrorMessage } from '../utils/errors';
 import {
   KeyIcon,
   PlusIcon,
@@ -28,8 +29,8 @@ export default function ApiKeys() {
     try {
       const { data } = await api.get('/auth/api-keys');
       setKeys(data.apiKeys);
-    } catch {
-      toast.error('Error al cargar API keys');
+    } catch (err) {
+      toast.error(getApiErrorMessage(err, 'Error al cargar las API keys'));
     } finally {
       setLoading(false);
     }
@@ -50,10 +51,7 @@ export default function ApiKeys() {
       loadKeys();
       toast.success('API key creada');
     } catch (err: unknown) {
-      const msg =
-        (err as { response?: { data?: { error?: string } } })?.response?.data?.error ||
-        'Error al crear API key';
-      toast.error(msg);
+      toast.error(getApiErrorMessage(err, 'Error al crear la API key'));
     } finally {
       setCreating(false);
     }
@@ -65,8 +63,8 @@ export default function ApiKeys() {
       await api.delete(`/auth/api-keys/${id}`);
       setKeys((prev) => prev.filter((k) => k.id !== id));
       toast.success('API key eliminada');
-    } catch {
-      toast.error('Error al eliminar API key');
+    } catch (err) {
+      toast.error(getApiErrorMessage(err, 'Error al eliminar la API key'));
     }
   };
 
@@ -80,7 +78,7 @@ export default function ApiKeys() {
       <div>
         <h2 className="text-lg font-semibold text-gray-900">API Keys</h2>
         <p className="mt-1 text-sm text-gray-500">
-          Usa API keys para autenticar requests programaticos a la API de ARCA.
+          Usá API keys para autenticar requests programáticos a la API de ARCA Server. La key actúa con los permisos de tu usuario.
         </p>
       </div>
 
@@ -88,7 +86,7 @@ export default function ApiKeys() {
       <div className="rounded-lg border border-indigo-100 bg-indigo-50 p-4">
         <h3 className="text-sm font-medium text-indigo-900">Uso</h3>
         <p className="mt-1 text-xs text-indigo-700">
-          Incluye el header <code className="rounded bg-indigo-100 px-1 py-0.5">X-API-Key: tu_api_key</code> en
+          Incluí el header <code className="rounded bg-indigo-100 px-1 py-0.5">X-API-Key: tu_api_key</code> en
           cada request. Ejemplo:
         </p>
         <pre className="mt-2 overflow-x-auto rounded bg-indigo-900 p-3 text-xs text-indigo-100">
@@ -106,7 +104,7 @@ export default function ApiKeys() {
           <ExclamationTriangleIcon className="h-5 w-5 flex-shrink-0 text-amber-500" aria-hidden="true" />
           <div className="flex-1">
             <p className="text-sm font-medium text-amber-800">
-              Guarda esta key — no se mostrara de nuevo
+              Guardá esta key: no se va a mostrar de nuevo
             </p>
             <div className="mt-2 flex items-center gap-2">
               <code className="flex-1 break-all rounded bg-amber-100 px-2 py-1 text-xs text-amber-900">
@@ -124,7 +122,7 @@ export default function ApiKeys() {
               onClick={() => setNewlyCreatedKey(null)}
               className="mt-2 text-xs text-amber-600 hover:text-amber-800"
             >
-              Ya la guarde, cerrar
+              Ya la guardé, cerrar
             </button>
           </div>
         </div>
@@ -141,7 +139,7 @@ export default function ApiKeys() {
             type="text"
             value={newKeyName}
             onChange={(e) => setNewKeyName(e.target.value)}
-            placeholder="ej: Mi App, Integracion ERP"
+            placeholder="ej: Mi App, Integración ERP"
             className="mt-1 block w-full rounded-lg border border-gray-300 px-3 py-2 text-sm shadow-sm focus:border-indigo-500 focus:outline-none focus:ring-2 focus:ring-indigo-500/20"
             maxLength={100}
           />
@@ -179,7 +177,7 @@ export default function ApiKeys() {
                   Key
                 </th>
                 <th scope="col" className="px-4 py-3 text-left text-xs font-medium uppercase text-gray-500">
-                  Ultimo uso
+                  Último uso
                 </th>
                 <th scope="col" className="px-4 py-3 text-left text-xs font-medium uppercase text-gray-500">
                   Creada

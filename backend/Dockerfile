@@ -17,8 +17,13 @@ FROM node:22-alpine
 
 WORKDIR /app
 
+# /app/certs (certificado y clave) y /app/tickets (Tickets de Acceso de WSAA) se montan como
+# volúmenes con nombre: al crearse toman este dueño, así el server puede escribir el
+# certificado que genera desde la UI (POST /api/afip/generate-cert).
 RUN addgroup -S appgroup && adduser -S appuser -G appgroup \
-  && mkdir -p /app/tickets && chown appuser:appgroup /app/tickets
+  && mkdir -p /app/certs /app/tickets \
+  && chown appuser:appgroup /app/certs /app/tickets \
+  && chmod 700 /app/certs /app/tickets
 
 COPY package.json package-lock.json* prisma.config.ts ./
 COPY prisma ./prisma/

@@ -5,19 +5,21 @@ import crypto from 'crypto';
 import { z } from 'zod';
 import { prisma } from '../lib/prisma';
 import { config } from '../config';
-import { authMiddleware, AuthPayload } from '../middleware/auth';
+import { authMiddleware, adminMiddleware, AuthPayload } from '../middleware/auth';
 
 const router = Router();
 
 const registerSchema = z.object({
-  email: z.string().email('Email invalido'),
-  password: z.string().min(8, 'La contraseña debe tener al menos 8 caracteres'),
-  name: z.string().min(2, 'El nombre debe tener al menos 2 caracteres'),
+  email: z.string().email('Email inválido'),
+  password: z.string().min(8, 'La contraseña tiene que tener al menos 8 caracteres'),
+  name: z.string().min(2, 'El nombre tiene que tener al menos 2 caracteres'),
+  // Solo lo usa un admin al crear usuarios (el primer usuario siempre es admin).
+  role: z.enum(['user', 'admin']).optional(),
 });
 
 const loginSchema = z.object({
-  email: z.string().email(),
-  password: z.string(),
+  email: z.string().email('Email inválido'),
+  password: z.string().min(1, 'La contraseña es obligatoria'),
 });
 
 const apiKeySchema = z.object({
@@ -32,30 +34,87 @@ function generateToken(user: { id: number; email: string; role: string }): strin
   );
 }
 
-// POST /api/auth/register
-router.post('/register', async (req: Request, res: Response, next: NextFunction) => {
-  try {
-    const { email, password, name } = registerSchema.parse(req.body);
+const REGISTRO_CERRADO = 'El registro está cerrado: solo un administrador puede crear usuarios.';
 
-    const existing = await prisma.user.findUnique({ where: { email } });
-    if (existing) {
-      res.status(409).json({ success: false, error: 'El email ya esta registrado' });
+/** Hay usuarios: el registro público está cerrado. */
+async function hayUsuarios(): Promise<boolean> {
+  return (await prisma.user.count()) > 0;
+}
+
+// GET /api/auth/registration-status - Público: { open } (true solo si todavía no hay usuarios)
+router.get('/registration-status', async (_req: Request, res: Response, next: NextFunction) => {
+  try {
+    res.json({ success: true, data: { open: !(await hayUsuarios()) } });
+  } catch (err) {
+    next(err);
+  }
+});
+
+/**
+ * Con usuarios existentes, /register exige un admin autenticado (JWT o API key).
+ * Sin usuarios es público: así se crea el primer admin.
+ */
+async function registroPermitido(req: Request, res: Response, next: NextFunction) {
+  try {
+    if (!(await hayUsuarios())) {
+      next();
       return;
     }
+    if (!req.header('Authorization') && !req.header('X-API-Key')) {
+      res.status(403).json({ success: false, error: REGISTRO_CERRADO });
+      return;
+    }
+    authMiddleware(req, res, () => adminMiddleware(req, res, next));
+  } catch (err) {
+    next(err);
+  }
+}
+
+// POST /api/auth/register
+// - Sin usuarios: público. Crea el primer usuario como admin y devuelve su token.
+// - Con usuarios: solo un admin. Crea un usuario (role "user" o "admin") y NO devuelve token.
+router.post('/register', registroPermitido, async (req: Request, res: Response, next: NextFunction) => {
+  try {
+    const { email, password, name, role: rolPedido } = registerSchema.parse(req.body);
 
     const hashedPassword = await bcrypt.hash(password, 12);
 
-    // First user gets admin role
-    const userCount = await prisma.user.count();
-    const role = userCount === 0 ? 'admin' : 'user';
+    // El conteo y el alta van en una transacción serializable: dos registros
+    // simultáneos con la base vacía no pueden crear dos admins "primeros".
+    const resultado = await prisma.$transaction(
+      async (tx) => {
+        const primero = (await tx.user.count()) === 0;
+        // Otro registro creó el primer usuario mientras tanto: sin admin, ya no se puede.
+        if (!primero && req.user?.role !== 'admin') return 'cerrado' as const;
+        const existing = await tx.user.findUnique({ where: { email } });
+        if (existing) return null;
+        const role = primero ? 'admin' : (rolPedido ?? 'user');
+        const user = await tx.user.create({
+          data: { email, password: hashedPassword, name, role },
+          select: { id: true, email: true, name: true, role: true, createdAt: true },
+        });
+        return { user, primero };
+      },
+      { isolationLevel: 'Serializable' },
+    );
 
-    const user = await prisma.user.create({
-      data: { email, password: hashedPassword, name, role },
-      select: { id: true, email: true, name: true, role: true, createdAt: true },
-    });
+    if (resultado === 'cerrado') {
+      res.status(403).json({ success: false, error: REGISTRO_CERRADO });
+      return;
+    }
+    if (!resultado) {
+      res.status(409).json({ success: false, error: 'El email ya está registrado' });
+      return;
+    }
+
+    const { user, primero } = resultado;
+    if (!primero) {
+      // Alta hecha por un admin: no se devuelve un token del usuario nuevo.
+      res.status(201).json({ success: true, user });
+      return;
+    }
 
     const token = generateToken({ id: user.id, email: user.email, role: user.role });
-
     res.status(201).json({ success: true, token, user });
   } catch (err) {
     next(err);
@@ -69,13 +128,13 @@ router.post('/login', async (req: Request, res: Response, next: NextFunction) =>
 
     const user = await prisma.user.findUnique({ where: { email } });
     if (!user) {
-      res.status(401).json({ success: false, error: 'Credenciales invalidas' });
+      res.status(401).json({ success: false, error: 'Credenciales inválidas' });
       return;
     }
 
     const valid = await bcrypt.compare(password, user.password);
     if (!valid) {
-      res.status(401).json({ success: false, error: 'Credenciales invalidas' });
+      res.status(401).json({ success: false, error: 'Credenciales inválidas' });
       return;
     }
 
@@ -131,7 +190,7 @@ router.post('/api-keys', authMiddleware, async (req: Request, res: Response, nex
 
     const keyCount = await prisma.apiKey.count({ where: { userId: req.user!.userId } });
     if (keyCount >= 5) {
-      res.status(400).json({ success: false, error: 'Maximo 5 API keys por usuario' });
+      res.status(400).json({ success: false, error: 'Máximo 5 API keys por usuario' });
       return;
     }
 
@@ -155,6 +214,10 @@ router.post('/api-keys', authMiddleware, async (req: Request, res: Response, nex
 router.delete('/api-keys/:id', authMiddleware, async (req: Request, res: Response, next: NextFunction) => {
   try {
     const id = parseInt(req.params.id as string, 10);
+    if (isNaN(id)) {
+      res.status(400).json({ success: false, error: 'ID de API key inválido' });
+      return;
+    }
     const apiKey = await prisma.apiKey.findFirst({
       where: { id, userId: req.user!.userId },
     });

@@ -110,12 +110,20 @@ export interface EmisionResult {
 }
 
 export interface InvoiceStats {
+  /** Solo facturas (sin notas de crédito ni de débito) */
   totalInvoices: number;
+  creditNotes: number;
+  debitNotes: number;
+  /** Facturas + ND − NC */
   totalAmount: number;
   /** Facturas pendientes de recuperación o en conflicto */
-  pendingInvoices?: number;
-  monthlyInvoices?: number;
-  monthlyAmount?: number;
+  pendingInvoices: number;
+  /** Facturas del mes (sin NC/ND) */
+  monthlyInvoices: number;
+  monthlyCreditNotes: number;
+  monthlyDebitNotes: number;
+  /** Facturas + ND − NC del mes */
+  monthlyAmount: number;
   byType: { cbteTipo: number; count: number; total: number }[];
 }
 
@@ -262,6 +270,16 @@ export type ServicioStatus =
   | { ok: true; status: ServerStatus }
   | { ok: false; error: string; status?: ServerStatus };
 
+export type AmbienteArca = 'production' | 'testing';
+
+/** `/afip/config`: configuración de ARCA activa del server */
+export interface ArcaConfig {
+  /** AFIP_PRODUCTION del server */
+  environment: AmbienteArca;
+  cuit: string | null;
+  puntoVenta: number;
+}
+
 /** `/afip/status`: WSFEv1 y WSFEX por separado */
 export interface ArcaStatus {
   wsfe: ServicioStatus;
@@ -281,32 +299,35 @@ export interface ArchivoEmpleados {
 }
 
 // Constants
+
+/** Largo mínimo de la contraseña (registerSchema del backend, routes/auth.ts). */
+export const LARGO_MINIMO_PASSWORD = 8;
 export const CBTE_TIPOS: Record<number, string> = {
   1: 'Factura A',
-  2: 'Nota de Debito A',
-  3: 'Nota de Credito A',
+  2: 'Nota de Débito A',
+  3: 'Nota de Crédito A',
   6: 'Factura B',
-  7: 'Nota de Debito B',
-  8: 'Nota de Credito B',
+  7: 'Nota de Débito B',
+  8: 'Nota de Crédito B',
   11: 'Factura C',
-  12: 'Nota de Debito C',
-  13: 'Nota de Credito C',
+  12: 'Nota de Débito C',
+  13: 'Nota de Crédito C',
 };
 
 export const DOC_TIPOS: Record<number, string> = {
   80: 'CUIT',
   86: 'CUIL',
   96: 'DNI',
-  99: 'Consumidor Final',
+  99: 'Sin identificar / Consumidor Final',
 };
 
 export const IVA_ALICUOTAS: Record<number, { name: string; rate: number }> = {
   3: { name: '0%', rate: 0 },
-  4: { name: '10.5%', rate: 10.5 },
+  4: { name: '10,5%', rate: 10.5 },
   5: { name: '21%', rate: 21 },
   6: { name: '27%', rate: 27 },
   8: { name: '5%', rate: 5 },
-  9: { name: '2.5%', rate: 2.5 },
+  9: { name: '2,5%', rate: 2.5 },
 };
 
 export const IVA_CONDITIONS: Record<number, string> = {
@@ -321,4 +342,42 @@ export const IVA_CONDITIONS: Record<number, string> = {
   13: 'Monotributo Social',
   15: 'IVA No Alcanzado',
   16: 'Monotributo Independiente Promovido',
+};
+
+/** Facturas A, B y C (`CbteTipo.FACTURA_A/B/C`): las que se emiten en Nueva Factura y admiten NC/ND. */
+export const TIPOS_FACTURA = [1, 6, 11];
+
+/**
+ * Clase de cada tipo de CBTE_TIPOS. Números de `CbteTipo` de
+ * @ramiidv/arca-facturacion (el frontend no depende de los SDKs).
+ */
+export const CLASE_CBTE: Record<number, 'A' | 'B' | 'C'> = {
+  1: 'A',
+  2: 'A',
+  3: 'A',
+  6: 'B',
+  7: 'B',
+  8: 'B',
+  11: 'C',
+  12: 'C',
+  13: 'C',
+};
+
+/**
+ * Condiciones de IVA del receptor por clase de comprobante, igual que
+ * `resolverCbteTipo` de @ramiidv/arca-facturacion (manual WSFEv1, RG 5616):
+ * - A: 1, 6, 13, 16 (`RECEPTORES_CLASE_A`, validación 10243).
+ * - B: 4, 5, 7, 8, 9, 10, 15.
+ * - C: todas las de IVA_CONDITIONS.
+ */
+export const CONDICIONES_IVA_POR_CLASE: Record<'A' | 'B' | 'C', number[]> = {
+  A: [1, 6, 13, 16],
+  B: [4, 5, 7, 8, 9, 10, 15],
+  C: Object.keys(IVA_CONDITIONS).map(Number),
+};
+
+/** Nombre de cada ambiente de ARCA (`ArcaConfig.environment`). */
+export const NOMBRE_AMBIENTE: Record<AmbienteArca, string> = {
+  production: 'Producción',
+  testing: 'Homologación',
 };

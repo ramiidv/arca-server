@@ -2,12 +2,29 @@ import { Router, Request, Response, NextFunction } from 'express';
 import fs from 'fs';
 import path from 'path';
 import { createCertificate, renewCertificate, getCertExpiry } from 'arca-cert';
-import { arca, padron, cdc, fecred, mtxca, sire, agro, reloadArca, probarCertificado, resetWsaaCooldown } from '../services/arca.service';
+import {
+  arca,
+  padron,
+  cdc,
+  fecred,
+  mtxca,
+  sire,
+  agro,
+  reloadArca,
+  probarCertificado,
+  resetWsaaCooldown,
+  ambienteArca,
+  nombreAmbiente,
+} from '../services/arca.service';
+import type { AmbienteArca } from '../services/arca.service';
 import { ArcaEmpleados } from '@ramiidv/arca-empleados';
 import { condicionIvaDesdePadron } from '@ramiidv/arca-padron';
 import type { RegistroRelacionLaboral } from '@ramiidv/arca-empleados';
 import { formatDate } from '@ramiidv/arca-common';
 import type { ServiceStatus } from '@ramiidv/arca-common';
+import { config } from '../config';
+import { adminMiddleware } from '../middleware/auth';
+import { AppError } from '../middleware/errorHandler';
 
 const router = Router();
 
@@ -20,7 +37,7 @@ const FECHA_RE = /^(\d{8}|\d{4}-\d{2}-\d{2})$/;
 function cuitParam(req: Request, res: Response): string | null {
   const cuit = req.params.cuit as string;
   if (!cuit || !CUIT_RE.test(cuit)) {
-    res.status(400).json({ success: false, error: 'CUIT must be 11 digits' });
+    res.status(400).json({ success: false, error: 'La CUIT tiene que tener 11 dígitos' });
     return null;
   }
   return cuit;
@@ -29,7 +46,7 @@ function cuitParam(req: Request, res: Response): string | null {
 /** El body tiene que ser un objeto JSON (su contenido lo valida el SDK con ArcaValidationError). */
 function bodyObjeto(req: Request, res: Response): Record<string, unknown> | null {
   if (!req.body || typeof req.body !== 'object' || Array.isArray(req.body)) {
-    res.status(400).json({ success: false, error: 'Request body must be a JSON object' });
+    res.status(400).json({ success: false, error: 'El body tiene que ser un objeto JSON' });
     return null;
   }
   return req.body as Record<string, unknown>;
@@ -238,7 +255,7 @@ router.get('/last-voucher', async (req: Request, res: Response, next: NextFuncti
     if (isNaN(puntoVenta) || isNaN(cbteTipo)) {
       res.status(400).json({
         success: false,
-        error: 'puntoVenta and cbteTipo query parameters are required and must be numbers',
+        error: 'Los parámetros puntoVenta y cbteTipo son obligatorios y tienen que ser números',
       });
       return;
     }
@@ -264,7 +281,7 @@ router.get('/comprobante', async (req: Request, res: Response, next: NextFunctio
     if (isNaN(puntoVenta) || isNaN(cbteTipo) || isNaN(cbteNro)) {
       res.status(400).json({
         success: false,
-        error: 'puntoVenta, cbteTipo and cbteNro query parameters are required and must be numbers',
+        error: 'Los parámetros puntoVenta, cbteTipo y cbteNro son obligatorios y tienen que ser números',
       });
       return;
     }
@@ -300,12 +317,12 @@ router.get('/cotizacion', async (req: Request, res: Response, next: NextFunction
     if (!monedaId || !/^[A-Za-z0-9]{3}$/.test(monedaId)) {
       res.status(400).json({
         success: false,
-        error: 'monedaId query parameter is required (3 characters, e.g. DOL)',
+        error: 'El parámetro monedaId es obligatorio (3 caracteres, por ejemplo DOL)',
       });
       return;
     }
     if (fecha !== undefined && !FECHA_RE.test(fecha)) {
-      res.status(400).json({ success: false, error: 'fecha must be YYYYMMDD or YYYY-MM-DD' });
+      res.status(400).json({ success: false, error: 'fecha tiene que tener formato YYYYMMDD o YYYY-MM-DD' });
       return;
     }
 
@@ -337,93 +354,174 @@ router.get('/tributo-types', async (_req: Request, res: Response, next: NextFunc
   }
 });
 
-// POST /generate-cert - Generate AFIP certificate using arca-cert
-router.post('/generate-cert', async (req: Request, res: Response, next: NextFunction) => {
-  try {
-    const { cuit, password, alias, environment } = req.body;
+// ============================================================
+// Certificados (arca-cert)
+// ============================================================
 
-    if (!cuit || !password || !alias) {
-      res.status(400).json({
-        success: false,
-        error: 'cuit, password, and alias are required',
-      });
-      return;
-    }
+const soloDigitos = (v: unknown) => String(v ?? '').replace(/\D/g, '');
 
-    const result = await createCertificate({
-      cuit: String(cuit),
-      password: String(password),
-      alias: String(alias),
-      environment: environment || 'production',
-    });
+/** `environment` del body: `'production'`, `'testing'` o ausente (el ambiente activo). `null` si es inválido. */
+function ambientePedido(environment: unknown): AmbienteArca | null {
+  if (environment === undefined) return ambienteArca();
+  return environment === 'production' || environment === 'testing' ? environment : null;
+}
 
-    // Save cert and key to disk
-    const certsDir = path.resolve(__dirname, '../../certs');
-    fs.mkdirSync(certsDir, { recursive: true });
-    fs.writeFileSync(path.join(certsDir, 'cert.crt'), result.cert);
-    fs.writeFileSync(path.join(certsDir, 'key.key'), result.key, { mode: 0o600 });
+const ERROR_AMBIENTE = "environment tiene que ser 'production' o 'testing'";
 
-    // Reload SDK with new certs, matching the cert's environment
-    reloadArca(result.environment === 'production');
-
-    res.json({
-      success: true,
-      data: {
-        alias: result.alias,
-        cuit: result.cuit,
-        environment: result.environment,
-        certPath: path.join(certsDir, 'cert.crt'),
-        keyPath: path.join(certsDir, 'key.key'),
-        message: 'Certificado generado y activado.',
-      },
-    });
-  } catch (error) {
-    next(error);
+/**
+ * Valida el pedido de generar/renovar un certificado. El certificado se instala
+ * en AFIP_CERT_PATH/AFIP_KEY_PATH y los SDKs lo usan con AFIP_CUIT y
+ * AFIP_PRODUCTION, así que se rechaza (400) un certificado de otra CUIT o de
+ * otro ambiente: instalado no funcionaría (WSAA rechaza el login o ARCA el
+ * ticket) y reemplazaría al que sí funciona. Para cambiar de CUIT o ambiente
+ * hay que cambiar esas variables y reiniciar el server.
+ */
+function pedidoCertificado(req: Request, res: Response) {
+  const { cuit, password, alias, environment } = req.body ?? {};
+  if (!cuit || !password || !alias) {
+    res.status(400).json({ success: false, error: 'cuit, password y alias son obligatorios' });
+    return null;
   }
+  const ambiente = ambientePedido(environment);
+  if (!ambiente) {
+    res.status(400).json({ success: false, error: ERROR_AMBIENTE });
+    return null;
+  }
+  const activo = ambienteArca();
+  if (ambiente !== activo) {
+    res.status(400).json({
+      success: false,
+      error:
+        `El server está en ${nombreAmbiente(activo)} (AFIP_PRODUCTION=${config.afip.production}): ` +
+        `un certificado de ${nombreAmbiente(ambiente)} no serviría. Generalo en ${nombreAmbiente(activo)}, ` +
+        `o cambiá AFIP_PRODUCTION y reiniciá el server antes de generarlo.`,
+    });
+    return null;
+  }
+  if (!config.afip.cuit) {
+    // Falta configuración del server, no es un error del pedido.
+    res.status(503).json({
+      success: false,
+      error: 'AFIP_CUIT no está configurada: definila con la CUIT del certificado y reiniciá el server antes de generarlo.',
+    });
+    return null;
+  }
+  if (soloDigitos(cuit) !== soloDigitos(config.afip.cuit)) {
+    res.status(400).json({
+      success: false,
+      error:
+        `La CUIT ${soloDigitos(cuit)} no coincide con AFIP_CUIT (${soloDigitos(config.afip.cuit)}), que es con la que ` +
+        'factura el server. Usá esa CUIT, o cambiá AFIP_CUIT y reiniciá el server antes de generar el certificado.',
+    });
+    return null;
+  }
+  return { cuit: soloDigitos(cuit), password: String(password), alias: String(alias), environment: ambiente };
+}
+
+/** Causa legible de un error de E/S al guardar el certificado (sin rutas: van solo al log). */
+const CAUSA_ERROR_ESCRITURA: Record<string, string> = {
+  EACCES: 'el server no tiene permiso de escritura en el directorio del certificado',
+  EPERM: 'el server no tiene permiso de escritura en el directorio del certificado',
+  EROFS: 'el directorio del certificado está en un sistema de archivos de solo lectura (¿volumen montado con :ro?)',
+  ENOSPC: 'no hay espacio en disco',
+  ENOENT: 'el directorio del certificado no existe y no se pudo crear',
+  ENOTDIR: 'la ruta del certificado (AFIP_CERT_PATH/AFIP_KEY_PATH) pasa por un archivo que no es un directorio',
+  // mkdir del directorio del certificado cuando ya existe un archivo con ese nombre
+  EEXIST: 'la ruta del certificado (AFIP_CERT_PATH/AFIP_KEY_PATH) pasa por un archivo que no es un directorio',
+};
+
+/**
+ * Guarda el certificado y la clave en AFIP_CERT_PATH y AFIP_KEY_PATH (los
+ * mismos archivos que leen los SDKs). Escribe primero archivos temporales y
+ * recién con los dos escritos los renombra: un error de escritura no toca el
+ * par instalado. Si algo falla se borran los temporales.
+ */
+function guardarCertificado(cert: string, key: string) {
+  const { certPath, keyPath } = config.afip;
+  const sufijo = `.${process.pid}.${Date.now()}.tmp`;
+  const certTmp = `${certPath}${sufijo}`;
+  const keyTmp = `${keyPath}${sufijo}`;
+  try {
+    fs.mkdirSync(path.dirname(certPath), { recursive: true });
+    fs.mkdirSync(path.dirname(keyPath), { recursive: true });
+    fs.writeFileSync(certTmp, cert);
+    fs.writeFileSync(keyTmp, key, { mode: 0o600 });
+    fs.renameSync(keyTmp, keyPath);
+    fs.renameSync(certTmp, certPath);
+  } catch (e) {
+    for (const tmp of [certTmp, keyTmp]) {
+      try {
+        fs.rmSync(tmp, { force: true });
+      } catch {
+        // No se pudo crear o ya no existe: no hay temporal que borrar.
+      }
+    }
+    const code = (e as NodeJS.ErrnoException).code ?? '';
+    console.error(`[ARCA] No se pudo guardar el certificado en ${certPath} / ${keyPath}:`, (e as Error).message);
+    throw new AppError(
+      500,
+      `No se pudo guardar el certificado: ${CAUSA_ERROR_ESCRITURA[code] ?? 'error de escritura en disco'}. ` +
+        'En Docker el certificado va en el volumen arca-certs (/app/certs). ' +
+        'ARCA ya emitió el certificado: corregí el problema y volvé a intentarlo con otro alias.',
+    );
+  }
+}
+
+// GET /config - Configuración de ARCA activa del server (ambiente, CUIT, punto de venta)
+router.get('/config', (_req: Request, res: Response) => {
+  res.json({
+    success: true,
+    data: {
+      environment: ambienteArca(),
+      cuit: config.afip.cuit || null,
+      puntoVenta: config.afip.puntoVenta,
+    },
+  });
 });
 
-// POST /renew-cert - Renew AFIP certificate
-router.post('/renew-cert', async (req: Request, res: Response, next: NextFunction) => {
-  try {
-    const { cuit, password, alias, environment } = req.body;
+/** Hay una generación/renovación en curso: dos a la vez se pisarían el par cert/clave instalado. */
+let certificadoEnCurso = false;
 
-    if (!cuit || !password || !alias) {
-      res.status(400).json({ success: false, error: 'cuit, password, and alias are required' });
-      return;
+/**
+ * POST /generate-cert y /renew-cert (solo admin): piden el certificado a ARCA
+ * con arca-cert, lo instalan y recrean los SDKs. La CUIT y el ambiente tienen
+ * que ser los del server (AFIP_CUIT, AFIP_PRODUCTION).
+ */
+function rutaCertificado(emitir: typeof createCertificate | typeof renewCertificate, mensaje: string) {
+  return async (req: Request, res: Response, next: NextFunction) => {
+    try {
+      const pedido = pedidoCertificado(req, res);
+      if (!pedido) return;
+      if (certificadoEnCurso) {
+        res.status(409).json({ success: false, error: 'Ya se está generando un certificado. Esperá a que termine.' });
+        return;
+      }
+      certificadoEnCurso = true;
+      try {
+        const result = await emitir(pedido);
+        guardarCertificado(result.cert, result.key);
+        reloadArca();
+        res.json({
+          success: true,
+          data: { alias: result.alias, cuit: result.cuit, environment: result.environment, message: mensaje },
+        });
+      } finally {
+        certificadoEnCurso = false;
+      }
+    } catch (error) {
+      next(error);
     }
+  };
+}
 
-    const result = await renewCertificate({
-      cuit: String(cuit),
-      password: String(password),
-      alias: String(alias),
-      environment: environment || 'production',
-    });
+router.post('/generate-cert', adminMiddleware, rutaCertificado(createCertificate, 'Certificado generado y activado.'));
+// Renovar = certificado nuevo con otro alias; el anterior sigue válido hasta vencer.
+router.post('/renew-cert', adminMiddleware, rutaCertificado(renewCertificate, 'Certificado renovado y activado.'));
 
-    const certsDir = path.resolve(__dirname, '../../certs');
-    fs.mkdirSync(certsDir, { recursive: true });
-    fs.writeFileSync(path.join(certsDir, 'cert.crt'), result.cert);
-    fs.writeFileSync(path.join(certsDir, 'key.key'), result.key, { mode: 0o600 });
-
-    reloadArca(result.environment === 'production');
-
-    res.json({
-      success: true,
-      data: {
-        alias: result.alias,
-        cuit: result.cuit,
-        environment: result.environment,
-        message: 'Certificado renovado y activado.',
-      },
-    });
-  } catch (error) {
-    next(error);
-  }
-});
-
-// GET /cert-info - Get current certificate expiry info
+// GET /cert-info - Vencimiento del certificado instalado (AFIP_CERT_PATH)
 router.get('/cert-info', async (_req: Request, res: Response, next: NextFunction) => {
   try {
-    const certPath = path.resolve(__dirname, '../../certs/cert.crt');
+    const certPath = config.afip.certPath;
     if (!fs.existsSync(certPath)) {
       res.json({ success: true, data: null });
       return;
@@ -453,23 +551,25 @@ router.get('/cert-info', async (_req: Request, res: Response, next: NextFunction
   }
 });
 
-// POST /test-cert - Test current certificate against WSAA
+// POST /test-cert - Prueba el certificado instalado contra WSAA. `environment`
+// opcional: default el ambiente activo del server (el que usan los SDKs).
 router.post('/test-cert', async (req: Request, res: Response, next: NextFunction) => {
   try {
-    const { environment } = req.body ?? {};
-    if (environment !== undefined && environment !== 'production' && environment !== 'testing') {
-      res.status(400).json({ success: false, error: "environment must be 'production' or 'testing'" });
+    const ambiente = ambientePedido(req.body?.environment);
+    if (!ambiente) {
+      res.status(400).json({ success: false, error: ERROR_AMBIENTE });
       return;
     }
     // Sin certificado instalado, probarCertificado responde 503 (AppError).
-    const ticket = await probarCertificado((environment ?? 'production') === 'production');
+    const ticket = await probarCertificado(ambiente === 'production');
 
     res.json({
       success: true,
       data: {
         valid: true,
+        environment: ambiente,
         expirationTime: ticket.expirationTime,
-        message: 'Certificado válido. Autenticación con WSAA exitosa.',
+        message: `Certificado válido. Autenticación con WSAA (${nombreAmbiente(ambiente)}) exitosa.`,
       },
     });
   } catch (error) {
@@ -497,7 +597,7 @@ router.get('/fecred-obligado/:cuit', async (req: Request, res: Response, next: N
     if (!cuit) return;
     const fechaEmision = (req.query.fechaEmision as string | undefined) ?? formatDate(new Date());
     if (!FECHA_RE.test(fechaEmision)) {
-      res.status(400).json({ success: false, error: 'fechaEmision must be YYYYMMDD or YYYY-MM-DD' });
+      res.status(400).json({ success: false, error: 'fechaEmision tiene que tener formato YYYYMMDD o YYYY-MM-DD' });
       return;
     }
     // { obligado?: boolean, montoDesde?, observaciones }: obligado falta si ARCA solo devolvió observaciones
@@ -592,7 +692,7 @@ router.get('/mtxca-ultimo-comprobante', async (req: Request, res: Response, next
     const ptoVta = parseInt(req.query.puntoVenta as string, 10);
     const cbteTipo = parseInt(req.query.cbteTipo as string, 10);
     if (isNaN(ptoVta) || isNaN(cbteTipo) || ptoVta < 1 || cbteTipo < 1) {
-      res.status(400).json({ success: false, error: 'puntoVenta and cbteTipo required' });
+      res.status(400).json({ success: false, error: 'puntoVenta y cbteTipo son obligatorios' });
       return;
     }
     const cbteNro = await mtxca.ultimoComprobante(ptoVta, cbteTipo);
@@ -701,21 +801,21 @@ router.post('/empleados-generar', async (req: Request, res: Response, next: Next
   try {
     const formato = req.query.formato as string | undefined;
     if (formato !== undefined && formato !== 'txt' && formato !== 'json') {
-      res.status(400).json({ success: false, error: "formato must be 'txt' or 'json'" });
+      res.status(400).json({ success: false, error: "formato tiene que ser 'txt' o 'json'" });
       return;
     }
 
     const { registros, strict, fechaReferencia } = req.body ?? {};
     if (!Array.isArray(registros) || registros.length === 0) {
-      res.status(400).json({ success: false, error: 'registros must be a non-empty array' });
+      res.status(400).json({ success: false, error: 'registros tiene que ser un array no vacío' });
       return;
     }
     if (strict !== undefined && typeof strict !== 'boolean') {
-      res.status(400).json({ success: false, error: 'strict must be a boolean' });
+      res.status(400).json({ success: false, error: 'strict tiene que ser un booleano' });
       return;
     }
     if (fechaReferencia !== undefined && (typeof fechaReferencia !== 'string' || !FECHA_RE.test(fechaReferencia))) {
-      res.status(400).json({ success: false, error: 'fechaReferencia must be YYYYMMDD or YYYY-MM-DD' });
+      res.status(400).json({ success: false, error: 'fechaReferencia tiene que tener formato YYYYMMDD o YYYY-MM-DD' });
       return;
     }
     const invalido = registros.findIndex(
@@ -727,7 +827,7 @@ router.post('/empleados-generar', async (req: Request, res: Response, next: Next
     if (invalido !== -1) {
       res.status(400).json({
         success: false,
-        error: `registros[${invalido}] must be { tipo: ${TIPOS_REGISTRO.join(' | ')}, data: object }`,
+        error: `registros[${invalido}] tiene que ser { tipo: ${TIPOS_REGISTRO.join(' | ')}, data: objeto }`,
       });
       return;
     }

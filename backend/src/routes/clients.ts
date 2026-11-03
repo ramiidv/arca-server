@@ -2,16 +2,17 @@ import { Router, Request, Response, NextFunction } from 'express';
 import { z } from 'zod';
 import { prisma } from '../lib/prisma';
 import { AppError } from '../middleware/errorHandler';
+import { paginacionSchema } from '../lib/paginacion';
 
 const router = Router();
 
 const createClientSchema = z.object({
-  name: z.string().min(1, 'Name is required').max(200),
+  name: z.string().min(1, 'El nombre es obligatorio').max(200),
   docType: z.number().int().min(0),
-  docNumber: z.string().min(1, 'Document number is required').max(20),
+  docNumber: z.string().min(1, 'El número de documento es obligatorio').max(20),
   ivaCondition: z.number().int().min(1),
   address: z.string().max(500).optional(),
-  email: z.string().email().optional().or(z.literal('')),
+  email: z.string().email('Email inválido').optional().or(z.literal('')),
   phone: z.string().max(50).optional(),
 });
 
@@ -33,9 +34,8 @@ router.post('/', async (req: Request, res: Response, next: NextFunction) => {
 // GET / - List clients
 router.get('/', async (req: Request, res: Response, next: NextFunction) => {
   try {
-    const search = req.query.search as string | undefined;
-    const page = req.query.page ? parseInt(req.query.page as string, 10) : 1;
-    const limit = req.query.limit ? parseInt(req.query.limit as string, 10) : 20;
+    const search = typeof req.query.search === 'string' && req.query.search.trim() ? req.query.search.trim() : undefined;
+    const { page, limit } = paginacionSchema.parse(req.query);
     const skip = (page - 1) * limit;
 
     const where = search
@@ -80,7 +80,7 @@ router.get('/:id', async (req: Request, res: Response, next: NextFunction) => {
   try {
     const id = parseInt(req.params.id as string, 10);
     if (isNaN(id)) {
-      res.status(400).json({ success: false, error: 'Invalid client ID' });
+      res.status(400).json({ success: false, error: 'ID de cliente inválido' });
       return;
     }
 
@@ -92,7 +92,7 @@ router.get('/:id', async (req: Request, res: Response, next: NextFunction) => {
     });
 
     if (!client) {
-      throw new AppError(404, `Client with ID ${id} not found`);
+      throw new AppError(404, `No existe el cliente #${id}`);
     }
 
     res.json({ success: true, data: client });
@@ -106,7 +106,7 @@ router.put('/:id', async (req: Request, res: Response, next: NextFunction) => {
   try {
     const id = parseInt(req.params.id as string, 10);
     if (isNaN(id)) {
-      res.status(400).json({ success: false, error: 'Invalid client ID' });
+      res.status(400).json({ success: false, error: 'ID de cliente inválido' });
       return;
     }
 
@@ -114,7 +114,7 @@ router.put('/:id', async (req: Request, res: Response, next: NextFunction) => {
 
     const existing = await prisma.client.findUnique({ where: { id } });
     if (!existing) {
-      throw new AppError(404, `Client with ID ${id} not found`);
+      throw new AppError(404, `No existe el cliente #${id}`);
     }
 
     const client = await prisma.client.update({
@@ -133,7 +133,7 @@ router.delete('/:id', async (req: Request, res: Response, next: NextFunction) =>
   try {
     const id = parseInt(req.params.id as string, 10);
     if (isNaN(id)) {
-      res.status(400).json({ success: false, error: 'Invalid client ID' });
+      res.status(400).json({ success: false, error: 'ID de cliente inválido' });
       return;
     }
 
@@ -143,19 +143,19 @@ router.delete('/:id', async (req: Request, res: Response, next: NextFunction) =>
     });
 
     if (!client) {
-      throw new AppError(404, `Client with ID ${id} not found`);
+      throw new AppError(404, `No existe el cliente #${id}`);
     }
 
     if (client._count.invoices > 0) {
       throw new AppError(
         409,
-        `Cannot delete client "${client.name}" because they have ${client._count.invoices} associated invoice(s). Remove the invoices first.`
+        `No se puede eliminar el cliente "${client.name}": tiene ${client._count.invoices} comprobante(s) asociado(s).`
       );
     }
 
     await prisma.client.delete({ where: { id } });
 
-    res.json({ success: true, message: `Client "${client.name}" deleted successfully` });
+    res.json({ success: true, message: `Cliente "${client.name}" eliminado` });
   } catch (error) {
     next(error);
   }

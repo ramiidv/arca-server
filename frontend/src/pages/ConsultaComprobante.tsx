@@ -30,7 +30,7 @@ export default function ConsultaComprobante() {
         setPuntosVenta(activos);
         if (activos.length > 0) setPuntoVenta(activos[0].nro);
       })
-      .catch(() => {});
+      .catch((err) => toast.error(getApiErrorMessage(err, 'Error al cargar los puntos de venta de ARCA'), { duration: 8000 }));
   }, []);
 
   const handleSearch = async (e: React.FormEvent) => {
@@ -47,7 +47,7 @@ export default function ConsultaComprobante() {
       const data = await consultarComprobante(puntoVenta, cbteTipo, nro);
       setResult(data);
     } catch (err) {
-      toast.error(getApiErrorMessage(err, 'No se encontró el comprobante en AFIP'), { duration: 8000 });
+      toast.error(getApiErrorMessage(err, 'No se encontró el comprobante en ARCA'), { duration: 8000 });
     } finally {
       setLoading(false);
     }
@@ -60,7 +60,7 @@ export default function ConsultaComprobante() {
       {/* Search form */}
       <div className="card">
         <h3 className="mb-4 text-base font-semibold text-gray-900">
-          Consultar Comprobante en AFIP
+          Consultar Comprobante en ARCA
         </h3>
         <form onSubmit={handleSearch} className="space-y-4">
           <div className="grid grid-cols-1 gap-4 sm:grid-cols-3">

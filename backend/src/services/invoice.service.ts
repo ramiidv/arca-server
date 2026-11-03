@@ -25,7 +25,7 @@ import { formatDate } from '@ramiidv/arca-common';
 import { prisma } from '../lib/prisma';
 import { arca } from './arca.service';
 import { config } from '../config';
-import { AppError } from '../middleware/errorHandler';
+import { AppError, mensajesArca } from '../middleware/errorHandler';
 
 interface InvoiceItemInput {
   description: string;
@@ -120,7 +120,7 @@ function processItemsForDB(items: InvoiceItemInput[]) {
   return items.map((item) => {
     const ivaRate = IVA_RATES[item.ivaId as keyof typeof IVA_RATES];
     if (ivaRate === undefined) {
-      throw new AppError(400, `Invalid IVA ID: ${item.ivaId}. Valid IDs: ${Object.keys(IVA_RATES).join(', ')}`);
+      throw new AppError(400, `Alícuota de IVA inválida: ${item.ivaId}. Valores válidos: ${Object.keys(IVA_RATES).join(', ')}`);
     }
     const subtotal = roundTwo(item.quantity * item.unitPrice);
     const ivaAmount = roundTwo(subtotal * (ivaRate / 100));
@@ -138,8 +138,13 @@ function processItemsForDB(items: InvoiceItemInput[]) {
 }
 
 function mensajes(obs: MensajeArca[]): string {
-  return obs.length > 0 ? obs.map((o) => `${o.code}: ${o.msg}`).join('; ') : 'Unknown reason';
+  return obs.length > 0 ? mensajesArca(obs) : 'ARCA no informó el motivo';
 }
+
+/** Tipos de nota de crédito (A, B, C, E, M y FCE): restan en los montos del dashboard. */
+const TIPOS_NOTA_CREDITO = new Set<number>(Object.values(NOTA_CREDITO_MAP));
+/** Tipos de nota de débito: se cuentan aparte de las facturas en el dashboard (suman en los montos). */
+const TIPOS_NOTA_DEBITO = new Set<number>(Object.values(NOTA_DEBITO_MAP));
 
 function esServicio(concepto: number): boolean {
   return concepto === Concepto.SERVICIOS || concepto === Concepto.PRODUCTOS_Y_SERVICIOS;
@@ -401,8 +406,16 @@ class InvoiceService {
       }
 
       if (desenlace.tipo === 'rechazada') {
+        // `aprobada: false`: ARCA evaluó el comprobante y lo rechazó (no se emitió).
+        // Mismo status y forma que un ArcaWSFEError: 422 con `errors` y `details`.
         await prisma.invoice.delete({ where: { id: creada.id } });
-        throw new AppError(400, `AFIP rejected comprobante: ${desenlace.motivo}`, true, desenlace.observaciones);
+        throw new AppError(
+          422,
+          `ARCA rechazó el comprobante: ${desenlace.motivo}`,
+          true,
+          desenlace.observaciones,
+          desenlace.observaciones,
+        );
       }
 
       if (desenlace.tipo === 'incierta') {
@@ -465,6 +478,7 @@ class InvoiceService {
         `ARCA rechazó el comprobante al reenviarlo: no se emitió y se eliminó el registro pendiente. ${desenlace.motivo}`,
         true,
         desenlace.observaciones,
+        desenlace.observaciones,
       );
     }
 
@@ -501,7 +515,8 @@ class InvoiceService {
     const processedItems = processItemsForDB(data.items);
     const items: LineItem[] = processedItems.map((item) => ({ neto: item.subtotal, iva: item.ivaId }));
 
-    const concepto = data.concepto ?? Concepto.SERVICIOS;
+    // Default: Productos (1), igual que la UI. Las fechas de servicio solo se envían con concepto 2 o 3.
+    const concepto = data.concepto ?? Concepto.PRODUCTOS;
     const servicio = esServicio(concepto);
     const condicionIva = await this.condicionIvaReceptor(data.docTipo, data.condicionIva, data.clientId);
     const today = formatDate(arca.wsaa.now());
@@ -556,11 +571,14 @@ class InvoiceService {
     });
 
     if (!originalInvoice) {
-      throw new AppError(404, `Original invoice with ID ${data.originalInvoiceId} not found`);
+      throw new AppError(404, `No existe la factura original #${data.originalInvoiceId}`);
     }
 
     if (!originalInvoice.cae || originalInvoice.resultado !== RESULTADO.APROBADA) {
-      throw new AppError(400, `Original invoice has no CAE, cannot create ${esNC ? 'credit' : 'debit'} note`);
+      throw new AppError(
+        400,
+        `La factura original no está autorizada (sin CAE): no se puede emitir una nota de ${esNC ? 'crédito' : 'débito'}`,
+      );
     }
 
     const cbteTipo = (esNC ? NOTA_CREDITO_MAP : NOTA_DEBITO_MAP)[originalInvoice.cbteTipo];
@@ -649,7 +667,7 @@ class InvoiceService {
   async recuperarFactura(id: number) {
     const invoice = await prisma.invoice.findUnique({ where: { id }, include: includeDetalle });
     if (!invoice) {
-      throw new AppError(404, `Invoice with ID ${id} not found`);
+      throw new AppError(404, `No existe la factura #${id}`);
     }
     if (invoice.resultado === RESULTADO.APROBADA) {
       return { invoice, afipResponse: { resultado: RESULTADO.APROBADA, cae: invoice.cae, mensaje: 'La factura ya está aprobada.' } };
@@ -735,33 +753,38 @@ class InvoiceService {
     });
 
     if (!invoice) {
-      throw new AppError(404, `Invoice with ID ${id} not found`);
+      throw new AppError(404, `No existe la factura #${id}`);
     }
 
     return invoice;
   }
 
-  async getInvoiceStats() {
-    // Los totales cuentan solo comprobantes autorizados (no los pendientes ni en conflicto).
+  /**
+   * Estadísticas del dashboard. Cuentan solo comprobantes autorizados (no los
+   * pendientes ni en conflicto). Los montos son netos de notas de crédito: una
+   * NC (cualquier tipo de NOTA_CREDITO_MAP) resta su total. Las cantidades separan facturas, notas de
+   * crédito y notas de débito (`totalCount` sigue siendo el total de comprobantes).
+   * "Mes" = mes calendario de Argentina según la fecha del comprobante (`cbteFch`).
+   */
+  async getInvoiceStats(hoy: Date = new Date()) {
     const aprobadas: Prisma.InvoiceWhereInput = { resultado: RESULTADO.APROBADA };
-    const [totalCount, totalsByType, totalAmount, recentInvoices, pendingCount] = await Promise.all([
-      prisma.invoice.count({ where: aprobadas }),
+    const mes = formatDate(hoy).slice(0, 6); // YYYYMM (fecha calendario de Argentina)
+    const delMes: Prisma.InvoiceWhereInput = {
+      ...aprobadas,
+      cbteFch: { gte: `${mes}01`, lte: `${mes}31` },
+    };
+    const [totalsByType, monthlyByType, pendingCount] = await Promise.all([
       prisma.invoice.groupBy({
         by: ['cbteTipo'],
         where: aprobadas,
         _count: { id: true },
         _sum: { impTotal: true },
       }),
-      prisma.invoice.aggregate({
-        where: aprobadas,
+      prisma.invoice.groupBy({
+        by: ['cbteTipo'],
+        where: delMes,
+        _count: { id: true },
         _sum: { impTotal: true },
-      }),
-      prisma.invoice.findMany({
-        orderBy: { createdAt: 'desc' },
-        take: 5,
-        include: {
-          client: { select: { name: true } },
-        },
       }),
       prisma.invoice.count({ where: { resultado: { in: [RESULTADO.PENDIENTE, RESULTADO.CONFLICTO] } } }),
     ]);
@@ -778,17 +801,51 @@ class InvoiceService {
       13: 'Nota de Crédito C',
     };
 
+    type Grupo = { cbteTipo: number; _count: { id: number }; _sum: { impTotal: unknown } };
+    /** Cantidades por clase de comprobante: facturas, notas de crédito y notas de débito. */
+    const cantidades = (grupos: Grupo[]) => {
+      const c = { facturas: 0, notasCredito: 0, notasDebito: 0 };
+      for (const g of grupos) {
+        if (TIPOS_NOTA_CREDITO.has(g.cbteTipo)) c.notasCredito += g._count.id;
+        else if (TIPOS_NOTA_DEBITO.has(g.cbteTipo)) c.notasDebito += g._count.id;
+        else c.facturas += g._count.id;
+      }
+      return c;
+    };
+    const totales = cantidades(totalsByType as Grupo[]);
+    const delMesCant = cantidades(monthlyByType as Grupo[]);
+
+    /** Suma de importes con las notas de crédito en negativo. */
+    const montoNeto = (grupos: Grupo[]) =>
+      roundTwo(
+        grupos.reduce((acc, g) => {
+          const total = Number(g._sum.impTotal ?? 0);
+          return acc + (TIPOS_NOTA_CREDITO.has(g.cbteTipo) ? -total : total);
+        }, 0),
+      );
+
     return {
-      totalCount,
+      /** Todos los comprobantes autorizados (facturas + NC + ND). */
+      totalCount: totales.facturas + totales.notasCredito + totales.notasDebito,
+      /** Solo facturas (sin notas de crédito ni de débito). */
+      invoiceCount: totales.facturas,
+      creditNoteCount: totales.notasCredito,
+      debitNoteCount: totales.notasDebito,
       pendingCount,
-      totalAmount: totalAmount._sum.impTotal || 0,
+      /** Facturas + ND − NC. */
+      totalAmount: montoNeto(totalsByType as Grupo[]),
+      /** Facturas del mes (sin NC/ND). */
+      monthlyInvoices: delMesCant.facturas,
+      monthlyCreditNotes: delMesCant.notasCredito,
+      monthlyDebitNotes: delMesCant.notasDebito,
+      /** Facturas + ND − NC del mes. */
+      monthlyAmount: montoNeto(monthlyByType as Grupo[]),
       byType: totalsByType.map((t) => ({
         cbteTipo: t.cbteTipo,
         name: CBTE_TIPO_NAMES[t.cbteTipo] || `Tipo ${t.cbteTipo}`,
         count: t._count.id,
         total: t._sum.impTotal || 0,
       })),
-      recentInvoices,
     };
   }
 }

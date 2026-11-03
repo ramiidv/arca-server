@@ -17,6 +17,8 @@ import type {
   ArcaStatus,
   ServerStatus,
   UltimoComprobante,
+  ArcaConfig,
+  AmbienteArca,
 } from '../types';
 
 const api = axios.create({
@@ -63,7 +65,11 @@ interface Paginado<T> {
 
 // La emisión puede tardar más que una consulta: si el resultado es incierto, el
 // backend espera y consulta a ARCA (recuperarComprobante) antes de responder.
+// Generar/renovar el certificado también (login al portal de ARCA). nginx espera
+// un poco más que esto (proxy_read_timeout de /api/invoices y /api/afip).
 const TIMEOUT_EMISION = 120000;
+/** Operaciones contra ARCA más lentas que una consulta común (constatar, probar el certificado). */
+const TIMEOUT_MEDIO = 60000;
 
 // Invoices
 export async function getInvoices(params?: {
@@ -120,16 +126,33 @@ export async function getInvoice(id: number) {
 
 export async function getInvoiceStats() {
   const { data } = await api.get('/invoices/stats');
+  // Campos de GET /invoices/stats que usa el dashboard (backend: getInvoiceStats)
   const s = unwrap<{
-    totalCount: number;
-    pendingCount?: number;
-    totalAmount: number | string;
-    byType: { cbteTipo: number; name?: string; count: number; total: number | string }[];
+    /** Solo facturas (sin NC/ND) */
+    invoiceCount: number;
+    creditNoteCount: number;
+    debitNoteCount: number;
+    pendingCount: number;
+    /** Neto de notas de crédito */
+    totalAmount: number;
+    /** Facturas autorizadas del mes en curso (fecha de Argentina), sin NC/ND */
+    monthlyInvoices: number;
+    monthlyCreditNotes: number;
+    monthlyDebitNotes: number;
+    /** Monto del mes, neto de notas de crédito */
+    monthlyAmount: number;
+    byType: { cbteTipo: number; count: number; total: number | string }[];
   }>(data);
   const stats: InvoiceStats = {
-    totalInvoices: s.totalCount,
-    totalAmount: Number(s.totalAmount),
-    pendingInvoices: s.pendingCount ?? 0,
+    totalInvoices: s.invoiceCount,
+    creditNotes: s.creditNoteCount,
+    debitNotes: s.debitNoteCount,
+    monthlyCreditNotes: s.monthlyCreditNotes,
+    monthlyDebitNotes: s.monthlyDebitNotes,
+    totalAmount: s.totalAmount,
+    pendingInvoices: s.pendingCount,
+    monthlyInvoices: s.monthlyInvoices,
+    monthlyAmount: s.monthlyAmount,
     byType: s.byType.map((t) => ({ cbteTipo: t.cbteTipo, count: t.count, total: Number(t.total) })),
   };
   return stats;
@@ -170,7 +193,24 @@ export async function deleteClient(id: number) {
   return data;
 }
 
-// AFIP — las respuestas usan los nombres camelCase de los SDKs @ramiidv/arca-*
+// ARCA — las respuestas usan los nombres camelCase de los SDKs @ramiidv/arca-*
+
+let arcaConfigPromise: Promise<ArcaConfig> | null = null;
+
+/**
+ * Configuración de ARCA activa del server: ambiente (AFIP_PRODUCTION), CUIT y
+ * punto de venta. No cambia sin reiniciar el server, así que se pide una vez.
+ */
+export function getArcaConfig(): Promise<ArcaConfig> {
+  arcaConfigPromise ??= api
+    .get('/afip/config')
+    .then(({ data }) => unwrap<ArcaConfig>(data))
+    .catch((err) => {
+      arcaConfigPromise = null;
+      throw err;
+    });
+  return arcaConfigPromise;
+}
 
 /** Estado de WSFEv1 y WSFEX: `{ wsfe, wsfex }`, cada uno `{ ok, status }` o `{ ok: false, error, status? }`. */
 export async function getAfipStatus() {
@@ -266,7 +306,7 @@ export async function getPadronStatus() {
 
 /** Constatación (WSCDC). `cbteModo` y `cuitEmisor` son obligatorios. */
 export async function constatarComprobante(input: ConstatarInput) {
-  const { data } = await api.post('/afip/constatar', input, { timeout: 60000 });
+  const { data } = await api.post('/afip/constatar', input, { timeout: TIMEOUT_MEDIO });
   return unwrap<ConstatarResult>(data);
 }
 
@@ -288,17 +328,24 @@ export async function getAfipOptionalTypes() {
 interface CertResult {
   alias: string;
   cuit: string;
-  environment: string;
+  environment: AmbienteArca;
   message: string;
 }
 
-export async function generateCert(payload: { cuit: string; password: string; alias: string; environment?: string }) {
-  const { data } = await api.post('/afip/generate-cert', payload, { timeout: 120000 });
+/** Datos para generar/renovar el certificado. El ambiente es siempre el activo del server (AFIP_PRODUCTION). */
+interface PedidoCertificado {
+  cuit: string;
+  password: string;
+  alias: string;
+}
+
+export async function generateCert(payload: PedidoCertificado) {
+  const { data } = await api.post('/afip/generate-cert', payload, { timeout: TIMEOUT_EMISION });
   return unwrap<CertResult>(data);
 }
 
-export async function renewCert(payload: { cuit: string; password: string; alias: string; environment?: string }) {
-  const { data } = await api.post('/afip/renew-cert', payload, { timeout: 120000 });
+export async function renewCert(payload: PedidoCertificado) {
+  const { data } = await api.post('/afip/renew-cert', payload, { timeout: TIMEOUT_EMISION });
   return unwrap<CertResult>(data);
 }
 
@@ -307,9 +354,24 @@ export async function getCertInfo() {
   return unwrap<{ notBefore: string; notAfter: string; daysLeft: number; expired: boolean } | null>(data);
 }
 
-export async function testCert(environment?: string) {
-  const { data } = await api.post('/afip/test-cert', { environment }, { timeout: 60000 });
-  return unwrap<{ valid: boolean; expirationTime: string; message: string }>(data);
+/** Prueba el certificado contra WSAA en el ambiente activo del server. */
+export async function testCert() {
+  const { data } = await api.post('/afip/test-cert', {}, { timeout: TIMEOUT_MEDIO });
+  return unwrap<{ valid: boolean; environment: AmbienteArca; expirationTime: string; message: string }>(data);
+}
+
+// Usuarios
+
+/** `open`: todavía no hay usuarios, el registro público crea el primer admin. */
+export async function getRegistrationStatus() {
+  const { data } = await api.get('/auth/registration-status');
+  return unwrap<{ open: boolean }>(data);
+}
+
+/** Alta de un usuario por un admin (no devuelve token: la sesión sigue siendo la del admin). */
+export async function createUser(payload: { name: string; email: string; password: string; role?: 'user' | 'admin' }) {
+  const { data } = await api.post('/auth/register', payload);
+  return (data as { user: { id: number; email: string; name: string; role: string } }).user;
 }
 
 // FECRED

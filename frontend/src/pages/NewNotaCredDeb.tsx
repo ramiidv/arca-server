@@ -9,7 +9,7 @@ import {
   MagnifyingGlassIcon,
 } from '@heroicons/react/24/outline';
 import { createNotaCredito, createNotaDebito, getInvoice, getInvoices } from '../api/client';
-import { CBTE_TIPOS, IVA_ALICUOTAS, IVA_CONDITIONS, type Invoice } from '../types';
+import { CBTE_TIPOS, CLASE_CBTE, IVA_ALICUOTAS, IVA_CONDITIONS, TIPOS_FACTURA, type Invoice } from '../types';
 import {
   formatCurrency,
   formatCbteTipo,
@@ -23,7 +23,7 @@ const NC_MAP: Record<number, number> = { 1: 3, 6: 8, 11: 13 };
 // Mapeo de factura -> ND
 const ND_MAP: Record<number, number> = { 1: 2, 6: 7, 11: 12 };
 // Solo facturas (no NC/ND) pueden tener NC/ND asociadas
-const FACTURAS_VALIDAS = new Set([1, 6, 11]);
+const FACTURAS_VALIDAS = new Set(TIPOS_FACTURA);
 
 interface FormItem {
   description: string;
@@ -70,7 +70,7 @@ export default function NewNotaCredDeb() {
   const { fields, append, remove } = useFieldArray({ control, name: 'items' });
   const watchItems = watch('items');
 
-  const isTipoC = selectedInvoice ? [11, 12, 13].includes(selectedInvoice.cbteTipo) : false;
+  const isTipoC = selectedInvoice ? CLASE_CBTE[selectedInvoice.cbteTipo] === 'C' : false;
   // Receptor identificado sin cliente: el backend no puede tomar la condición de IVA del cliente
   // (si la factura original se emitió con esta versión, la toma de sus datos de emisión).
   const pideCondicionIva = !!selectedInvoice && selectedInvoice.docTipo !== 99 && !selectedInvoice.client;
@@ -87,7 +87,7 @@ export default function NewNotaCredDeb() {
             toast.error('Solo se pueden crear NC/ND sobre facturas');
           }
         })
-        .catch(() => toast.error('No se pudo cargar la factura'))
+        .catch((err) => toast.error(getApiErrorMessage(err, 'No se pudo cargar la factura')))
         .finally(() => setLoadingInvoice(false));
     }
   }, [preselectedId]);
@@ -103,8 +103,8 @@ export default function NewNotaCredDeb() {
         (inv) => FACTURAS_VALIDAS.has(inv.cbteTipo) && inv.cae && inv.resultado === 'A'
       );
       setInvoices(valid);
-    } catch {
-      toast.error('Error buscando facturas');
+    } catch (err) {
+      toast.error(getApiErrorMessage(err, 'Error buscando facturas'));
     } finally {
       setLoadingInvoice(false);
     }
@@ -480,6 +480,9 @@ export default function NewNotaCredDeb() {
               rows={3}
               placeholder="Observaciones opcionales..."
             />
+            <p className="mt-1 text-[11px] text-gray-400">
+              Notas internas: se guardan solo en este sistema y no se envían a ARCA.
+            </p>
           </div>
 
           {/* Totals */}

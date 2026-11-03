@@ -21,10 +21,30 @@ const db = vi.hoisted(() => {
   const clients = new Map<number, any>();
   let nextId = 1;
   const conInclude = (inv: any) => (inv ? { ...inv, client: inv.clientId ? clients.get(inv.clientId) ?? null : null } : null);
+  /** Subconjunto de los filtros de Prisma que usa el servicio: igualdad, `in`, `gte`/`lte`. */
+  const cumple = (i: any, where: any = {}) =>
+    Object.entries(where).every(([k, v]: [string, any]) => {
+      if (v && typeof v === 'object') {
+        if ('in' in v) return v.in.includes(i[k]);
+        return (v.gte === undefined || i[k] >= v.gte) && (v.lte === undefined || i[k] <= v.lte);
+      }
+      return i[k] === v;
+    });
+  const filtrar = (where: any) => [...invoices.values()].filter((i) => cumple(i, where));
   const prisma = {
     invoice: {
-      findFirst: async ({ where }: any) =>
-        [...invoices.values()].find((i) => Object.entries(where).every(([k, v]) => i[k] === v)) ?? null,
+      findFirst: async ({ where }: any) => filtrar(where)[0] ?? null,
+      count: async ({ where }: any) => filtrar(where).length,
+      groupBy: async ({ where }: any) => {
+        const grupos = new Map<number, { cbteTipo: number; _count: { id: number }; _sum: { impTotal: number } }>();
+        for (const i of filtrar(where)) {
+          const g = grupos.get(i.cbteTipo) ?? { cbteTipo: i.cbteTipo, _count: { id: 0 }, _sum: { impTotal: 0 } };
+          g._count.id += 1;
+          g._sum.impTotal += Number(i.impTotal);
+          grupos.set(i.cbteTipo, g);
+        }
+        return [...grupos.values()];
+      },
       findUnique: async ({ where }: any) => conInclude(invoices.get(where.id)),
       create: async ({ data }: any) => {
         for (const i of invoices.values()) {
@@ -207,8 +227,77 @@ describe('invoice.service: emisión', () => {
       observaciones: [{ code: 10048, msg: 'Importe inválido' }],
     }));
 
-    await expect(invoiceService.createInvoice(facturaB)).rejects.toBeInstanceOf(AppError);
+    const error = await invoiceService.createInvoice(facturaB).catch((e) => e);
+    expect(error).toBeInstanceOf(AppError);
+    // Mismo status que un ArcaWSFEError (422), en español y con las observaciones de ARCA.
+    expect(error.statusCode).toBe(422);
+    expect(error.message).toBe('ARCA rechazó el comprobante: 10048: Importe inválido');
+    expect(error.errors).toEqual([{ code: 10048, msg: 'Importe inválido' }]);
     expect(db.invoices.size).toBe(0);
+  });
+
+  it('sin concepto usa 1 (Productos), como la UI, y no envía fechas de servicio', async () => {
+    arcaMock.facturar.mockImplementation(async (opts: any) => aprobada(intentoDe(opts.cbteNro)));
+    const { concepto: _omitido, ...sinConcepto } = facturaB;
+
+    const { invoice } = await invoiceService.createInvoice({
+      ...sinConcepto,
+      fchServDesde: '20261001',
+      fchServHasta: '20261031',
+    });
+
+    const enviado = arcaMock.facturar.mock.calls[0][0];
+    expect(enviado.concepto).toBe(1);
+    expect(enviado).not.toHaveProperty('servicio');
+    expect(invoice).toMatchObject({ concepto: 1, fchServDesde: undefined, fchServHasta: undefined });
+  });
+
+  it('concepto 2 (Servicios) envía el período de servicio', async () => {
+    arcaMock.facturar.mockImplementation(async (opts: any) => aprobada(intentoDe(opts.cbteNro)));
+
+    await invoiceService.createInvoice({ ...facturaB, concepto: 2, fchServDesde: '20261001', fchServHasta: '20261031' });
+
+    expect(arcaMock.facturar.mock.calls[0][0].servicio).toEqual({ desde: '20261001', hasta: '20261031', vtoPago: HOY });
+  });
+});
+
+describe('invoice.service: estadísticas del dashboard', () => {
+  function guardar(cbteTipo: number, impTotal: number, cbteFch: string, resultado: string = RESULTADO.APROBADA) {
+    const id = db.invoices.size + 100;
+    db.invoices.set(id, { id, cbteTipo, impTotal, cbteFch, resultado, clientId: null });
+  }
+
+  it('cuenta los comprobantes del mes (Argentina) y resta las notas de crédito en los montos', async () => {
+    guardar(CbteTipo.FACTURA_B, 1210, '20261101');
+    guardar(CbteTipo.FACTURA_A, 2420, '20261115');
+    guardar(CbteTipo.NOTA_CREDITO_B, 210, '20261120');
+    guardar(CbteTipo.NOTA_DEBITO_B, 100, '20261030'); // mes anterior
+    guardar(CbteTipo.FACTURA_C, 5000, '20261105', RESULTADO.PENDIENTE); // no cuenta
+
+    const stats = await invoiceService.getInvoiceStats(new Date('2026-11-25T15:00:00Z'));
+
+    expect(stats.totalCount).toBe(4);
+    // Las cantidades separan facturas de NC/ND (coherente con "Monto Total (neto de NC)").
+    expect(stats.invoiceCount).toBe(2);
+    expect(stats.creditNoteCount).toBe(1);
+    expect(stats.debitNoteCount).toBe(1);
+    expect(stats.pendingCount).toBe(1);
+    expect(stats.totalAmount).toBe(1210 + 2420 - 210 + 100);
+    expect(stats.monthlyInvoices).toBe(2);
+    expect(stats.monthlyCreditNotes).toBe(1);
+    expect(stats.monthlyDebitNotes).toBe(0);
+    expect(stats.monthlyAmount).toBe(1210 + 2420 - 210);
+  });
+
+  it('el mes se toma con la fecha calendario de Argentina', async () => {
+    guardar(CbteTipo.FACTURA_B, 1000, '20261031');
+    guardar(CbteTipo.FACTURA_B, 500, '20261101');
+
+    // 2026-11-01T01:00Z = 31/10 22:00 en Argentina → mes de octubre.
+    const stats = await invoiceService.getInvoiceStats(new Date('2026-11-01T01:00:00Z'));
+
+    expect(stats.monthlyInvoices).toBe(1);
+    expect(stats.monthlyAmount).toBe(1000);
   });
 });
 

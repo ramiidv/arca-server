@@ -1,7 +1,10 @@
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
 import { Link, useNavigate } from 'react-router-dom';
 import { useAuth } from '../context/AuthContext';
 import toast from 'react-hot-toast';
+import { getRegistrationStatus } from '../api/client';
+import { getApiErrorMessage } from '../utils/errors';
+import { LARGO_MINIMO_PASSWORD } from '../types';
 import { DocumentTextIcon, EyeIcon, EyeSlashIcon } from '@heroicons/react/24/outline';
 
 export default function Register() {
@@ -13,15 +16,27 @@ export default function Register() {
   const [loading, setLoading] = useState(false);
   const { register } = useAuth();
   const navigate = useNavigate();
+  // null = consultando. El registro público solo crea el primer usuario (admin);
+  // después, los usuarios los crea un administrador desde Configuración.
+  const [abierto, setAbierto] = useState<boolean | null>(null);
+  const [errorEstado, setErrorEstado] = useState<string | null>(null);
+  useEffect(() => {
+    getRegistrationStatus()
+      .then((r) => setAbierto(r.open))
+      .catch((err) => {
+        setAbierto(false);
+        setErrorEstado(getApiErrorMessage(err, 'No se pudo consultar si el registro está abierto'));
+      });
+  }, []);
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!name || !email || !password) {
-      toast.error('Completa todos los campos');
+      toast.error('Completá todos los campos');
       return;
     }
-    if (password.length < 8) {
-      toast.error('La contraseña debe tener al menos 8 caracteres');
+    if (password.length < LARGO_MINIMO_PASSWORD) {
+      toast.error(`La contraseña tiene que tener al menos ${LARGO_MINIMO_PASSWORD} caracteres`);
       return;
     }
     if (password !== confirmPassword) {
@@ -34,10 +49,7 @@ export default function Register() {
       toast.success('Cuenta creada exitosamente');
       navigate('/', { replace: true });
     } catch (err: unknown) {
-      const msg =
-        (err as { response?: { data?: { error?: string } } })?.response?.data?.error ||
-        'Error al registrarse';
-      toast.error(msg);
+      toast.error(getApiErrorMessage(err, 'Error al registrarse'));
     } finally {
       setLoading(false);
     }
@@ -52,7 +64,7 @@ export default function Register() {
             <DocumentTextIcon className="h-8 w-8 text-white" aria-hidden="true" />
           </div>
           <h1 className="mt-4 text-3xl font-bold text-white">ARCA</h1>
-          <p className="mt-1 text-sm text-indigo-300">Facturacion Electronica</p>
+          <p className="mt-1 text-sm text-indigo-300">Facturación Electrónica</p>
         </div>
 
         {/* Form */}
@@ -61,9 +73,18 @@ export default function Register() {
           className="rounded-2xl bg-white p-8 shadow-2xl"
           noValidate
         >
-          <h2 className="mb-6 text-center text-xl font-semibold text-gray-900">
+          <h2 className="mb-2 text-center text-xl font-semibold text-gray-900">
             Crear Cuenta
           </h2>
+          {abierto === false ? (
+            <p className="mb-6 rounded-lg bg-amber-50 px-3 py-2 text-center text-sm text-amber-800" role="alert">
+              {errorEstado ?? 'El registro está cerrado: ya hay usuarios. Pedile a un administrador que te cree una cuenta.'}
+            </p>
+          ) : (
+            <p className="mb-6 text-center text-xs text-gray-500">
+              Es la primera cuenta del sistema: va a tener rol de administrador.
+            </p>
+          )}
 
           <div className="space-y-4">
             <div>
@@ -111,7 +132,7 @@ export default function Register() {
                   value={password}
                   onChange={(e) => setPassword(e.target.value)}
                   className="block w-full rounded-lg border border-gray-300 px-4 py-2.5 pr-10 text-gray-900 shadow-sm transition-colors focus:border-indigo-500 focus:outline-none focus:ring-2 focus:ring-indigo-500/20"
-                  placeholder="Minimo 8 caracteres"
+                  placeholder={`Mínimo ${LARGO_MINIMO_PASSWORD} caracteres`}
                 />
                 <button
                   type="button"
@@ -140,14 +161,14 @@ export default function Register() {
                 value={confirmPassword}
                 onChange={(e) => setConfirmPassword(e.target.value)}
                 className="mt-1 block w-full rounded-lg border border-gray-300 px-4 py-2.5 text-gray-900 shadow-sm transition-colors focus:border-indigo-500 focus:outline-none focus:ring-2 focus:ring-indigo-500/20"
-                placeholder="Repeti la contraseña"
+                placeholder="Repetí la contraseña"
               />
             </div>
           </div>
 
           <button
             type="submit"
-            disabled={loading}
+            disabled={loading || abierto !== true}
             className="mt-6 flex w-full items-center justify-center rounded-lg bg-indigo-600 px-4 py-2.5 text-sm font-semibold text-white shadow-sm transition-colors hover:bg-indigo-500 focus:outline-none focus:ring-2 focus:ring-indigo-500 focus:ring-offset-2 disabled:cursor-not-allowed disabled:opacity-50"
           >
             {loading ? (
@@ -161,12 +182,12 @@ export default function Register() {
           </button>
 
           <p className="mt-4 text-center text-sm text-gray-500">
-            ¿Ya tenes cuenta?{' '}
+            ¿Ya tenés cuenta?{' '}
             <Link
               to="/login"
               className="font-medium text-indigo-600 hover:text-indigo-500 focus:outline-none focus:underline"
             >
-              Inicia sesion
+              Iniciá sesión
             </Link>
           </p>
         </form>
