@@ -42,13 +42,16 @@ import { errorHandler, AppError } from '../src/middleware/errorHandler';
 function run(err: Error) {
   let status = 0;
   let body: any;
+  const headers: Record<string, string> = {};
   const res = {
     status(code: number) { status = code; return this; },
+    set(name: string, value: string) { headers[name] = value; return this; },
     json(b: unknown) { body = b; return this; },
   } as unknown as Response;
   vi.spyOn(console, 'error').mockImplementation(() => {});
   errorHandler(err, {} as Request, res, () => {});
-  return { status, body };
+  // `headers` solo si el handler setea alguno (así los demás tests comparan { status, body }).
+  return Object.keys(headers).length > 0 ? { status, body, headers } : { status, body, headers: undefined };
 }
 
 const intento = { ptoVta: 1, cbteTipo: 6, cbteNro: 42, importeTotal: 121, docTipo: 99, docNro: 0, fecha: '20261101' };
@@ -81,10 +84,19 @@ describe('errorHandler: errores de los SDKs de ARCA', () => {
   });
 
   it('ArcaTicketVigenteError → 503 (aunque es subclase de ArcaAuthError)', () => {
-    const { status, body } = run(new ArcaTicketVigenteError('wsfe'));
+    const { status, body, headers } = run(new ArcaTicketVigenteError('wsfe'));
     expect(status).toBe(503);
     expect(body.code).toBe('ARCA_TICKET_VIGENTE');
     expect(body.service).toBe('wsfe');
+    expect(body.retryable).toBe(true);
+    expect(headers).toBeUndefined();
+  });
+
+  it('ArcaTicketVigenteError con retryAfterMs → Retry-After en segundos', () => {
+    const { body, headers } = run(new ArcaTicketVigenteError('wsfe', { retryAfterMs: 119_500 }));
+    expect(headers?.['Retry-After']).toBe('120');
+    expect(body.retryAfterMs).toBe(119_500);
+    expect(body.error).toMatch(/Reintentá en 120 s/);
   });
 
   it('ArcaConflictoExpo → 409 con el Id y los comprobantes enviado/respondido (sin el request completo)', () => {

@@ -225,13 +225,23 @@ export function errorHandler(
     return;
   }
 
-  // Antes que ArcaAuthError (es una subclase).
+  // Antes que ArcaAuthError (es una subclase). WSAA rechaza los pedidos repetidos
+  // durante un lapso de retención (minutos): el cliente puede reintentar después
+  // de `retryAfterMs` (también en el header Retry-After, en segundos).
   if (err instanceof ArcaTicketVigenteError) {
+    const retryAfterS = err.retryAfterMs !== undefined && Number.isFinite(err.retryAfterMs)
+      ? Math.ceil(err.retryAfterMs / 1000)
+      : undefined;
+    if (retryAfterS !== undefined) res.set('Retry-After', String(retryAfterS));
     res.status(503).json({
       success: false,
       code: err.code,
-      error: `WSAA ya emitió un Ticket de Acceso vigente para "${err.service}" que no está guardado. Hay que esperar a que venza (hasta 12 horas).`,
+      error:
+        `WSAA ya emitió un Ticket de Acceso vigente para "${err.service}" que no está guardado y rechaza los ` +
+        `pedidos repetidos durante unos minutos.${retryAfterS !== undefined ? ` Reintentá en ${retryAfterS} s.` : ' Reintentá en unos minutos.'}`,
       service: err.service,
+      retryable: true,
+      ...(err.retryAfterMs !== undefined && { retryAfterMs: err.retryAfterMs }),
     });
     return;
   }
