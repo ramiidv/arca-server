@@ -5,6 +5,7 @@ import {
   ArcaTicketVigenteError,
   ArcaSoapError,
   ArcaServiceError,
+  ArcaRechazoError,
   ArcaValidationError,
   ArcaWSFEError,
   ArcaResultadoIncierto,
@@ -298,7 +299,22 @@ export function errorHandler(
     return;
   }
 
-  // Rechazos de negocio del resto de los servicios (SIRE, agro, FECRED, CDC, MTXCA).
+  // ARCA rechazó la operación (resultado "R") en una emisión de MTXCA, FECRED o
+  // SIRE: no se emitió. Antes que ArcaServiceError (es una subclase).
+  if (err instanceof ArcaRechazoError) {
+    const motivos = err.errors.length > 0 ? err.errors : err.observaciones;
+    res.status(422).json({
+      success: false,
+      code: err.code,
+      operacion: err.operacion,
+      error: `ARCA rechazó la operación: ${mensajesArca(motivos) || err.message}`,
+      errors: err.errors,
+      observaciones: err.observaciones,
+    });
+    return;
+  }
+
+  // Errores de negocio del resto de los servicios (SIRE, agro, FECRED, CDC, MTXCA).
   if (err instanceof ArcaServiceError) {
     res.status(422).json({
       success: false,

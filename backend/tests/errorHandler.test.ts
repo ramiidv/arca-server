@@ -27,6 +27,7 @@ import {
   ArcaTicketVigenteError,
   ArcaSoapError,
   ArcaServiceError,
+  ArcaRechazoError,
   ArcaValidationError,
   ArcaWSFEError,
   ArcaResultadoIncierto,
@@ -37,6 +38,7 @@ import {
 import { ArcaPadronServiceError, ArcaPadronError } from '@ramiidv/arca-padron';
 import { ArcaAgroServiceError, ArcaAgroResponseError } from '@ramiidv/arca-agro';
 import { ArcaSerializationError } from '@ramiidv/arca-empleados';
+import { ArcaSireServiceError } from '@ramiidv/arca-sire';
 import { errorHandler, AppError } from '../src/middleware/errorHandler';
 
 function run(err: Error) {
@@ -189,6 +191,45 @@ describe('errorHandler: errores de los SDKs de ARCA', () => {
     expect(generico.status).toBe(422);
   });
 
+  it('ArcaRechazoError (MTXCA, FECRED) → 422 con operacion, errors y observaciones', () => {
+    const conErrores = run(
+      new ArcaRechazoError('WSMTXCA autorizarComprobante: rechazado', {
+        operacion: 'autorizarComprobante',
+        errors: [{ code: 102, msg: 'Número no correlativo' }],
+        observaciones: [{ code: 7, msg: 'aviso' }],
+      }),
+    );
+    expect(conErrores.status).toBe(422);
+    expect(conErrores.body).toEqual({
+      success: false,
+      code: 'ARCA_RECHAZO',
+      operacion: 'autorizarComprobante',
+      error: 'ARCA rechazó la operación: 102: Número no correlativo',
+      errors: [{ code: 102, msg: 'Número no correlativo' }],
+      observaciones: [{ code: 7, msg: 'aviso' }],
+    });
+
+    // Sin errores, el mensaje usa las observaciones.
+    const soloObs = run(
+      new ArcaRechazoError('WSFECRED aceptarFECred: rechazado', {
+        operacion: 'aceptarFECred',
+        observaciones: [{ code: 3, msg: 'Saldo inválido' }],
+      }),
+    );
+    expect(soloObs.body.error).toBe('ARCA rechazó la operación: 3: Saldo inválido');
+  });
+
+  it('ArcaSireServiceError (subclase de ArcaRechazoError) → 422 con operacion', () => {
+    const { status, body } = run(
+      new ArcaSireServiceError('SIRE emitir: régimen inválido', {
+        operacion: 'emitir',
+        errors: [{ code: 0, msg: 'régimen inválido' }],
+      }),
+    );
+    expect(status).toBe(422);
+    expect(body).toMatchObject({ code: 'ARCA_SIRE_SERVICE_ERROR', operacion: 'emitir', errors: [{ code: 0, msg: 'régimen inválido' }] });
+  });
+
   it('ArcaSoapError con Fault → 502 con faultCode/faultString y upstreamStatus', () => {
     const { status, body } = run(
       new ArcaSoapError('SOAP Fault: Servicio no disponible', {
@@ -276,7 +317,7 @@ describe('errorHandler: errores de la app', () => {
     expect(body).toEqual({ success: false, error: 'Error interno del servidor' });
   });
 
-  it('AppError con errors de ARCA los incluye (rechazo con aprobada: false)', () => {
+  it('AppError con errors de ARCA los incluye (rechazo de una factura)', () => {
     const obs = [{ code: 10048, msg: 'Importe inválido' }];
     const { status, body } = run(new AppError(422, 'ARCA rechazó el comprobante: 10048: Importe inválido', true, obs, obs));
     expect(status).toBe(422);

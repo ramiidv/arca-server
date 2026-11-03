@@ -6,6 +6,7 @@ import {
   NOTA_CREDITO_MAP,
   NOTA_DEBITO_MAP,
   ArcaResultadoIncierto,
+  ArcaRechazoError,
   ArcaResponseError,
   ArcaSoapError,
   ArcaWSFEError,
@@ -112,6 +113,11 @@ type Desenlace =
   | { tipo: 'conflicto'; motivo: string; encontrado: Record<string, unknown> }
   | { tipo: 'rechazada'; motivo: string; observaciones: MensajeArca[] };
 
+/** Rechazo de ARCA (`resultado` "R"): con certeza no se emitió. */
+function rechazada(e: ArcaRechazoError): Desenlace {
+  return { tipo: 'rechazada', motivo: mensajes(e.observaciones), observaciones: e.observaciones };
+}
+
 /** Redondeo a 2 decimales mitad al par, el mismo criterio que usan los SDKs (manual de WSFEv1). */
 function roundTwo(n: number): number {
   return roundHalfEven(n, 2);
@@ -198,20 +204,19 @@ function llamar(operacion: Operacion, opts: OptsEmision): Promise<FacturaResult>
 
 /**
  * Envía el comprobante una vez y clasifica la respuesta:
- * - `aprobada`: ARCA otorgó el CAE.
+ * - `aprobada`: ARCA otorgó el CAE (el SDK siempre devuelve un comprobante autorizado).
  * - `incierta`: `ArcaResultadoIncierto` (o un `ArcaSoapError`/`ArcaResponseError`
  *   incierto; el SDK ya los convierte en `ArcaResultadoIncierto` en las emisiones),
- *   o un rechazo 10016 por número que puede significar que un intento anterior
- *   se autorizó (`requiereRecuperacion`).
- * - `rechazada`: `aprobada: false` con observaciones (no se emitió).
- * Cualquier otro error se propaga: `ArcaWSFEError` (ARCA rechazó, no se emitió),
- * `ArcaAuthError` (login WSAA fallido o ticket rechazado con 600/601: no se
- * procesó), o errores antes de enviar (validación, sin conexión).
+ *   o un 10016 por número que puede significar que un intento anterior se
+ *   autorizó (`requiereRecuperacion`).
+ * - `rechazada`: `ArcaRechazoError` (resultado "R", no se emitió).
+ * Cualquier otro error se propaga: `ArcaWSFEError` (ARCA rechazó la solicitud,
+ * no se emitió), `ArcaAuthError` (login WSAA fallido o ticket rechazado con
+ * 600/601: no se procesó), o errores antes de enviar (validación, sin conexión).
  */
 async function enviar(operacion: Operacion, opts: OptsEmision): Promise<Desenlace> {
-  let result: FacturaResult;
   try {
-    result = await llamar(operacion, opts);
+    return { tipo: 'aprobada', result: await llamar(operacion, opts) };
   } catch (e) {
     if (
       e instanceof ArcaResultadoIncierto ||
@@ -219,13 +224,12 @@ async function enviar(operacion: Operacion, opts: OptsEmision): Promise<Desenlac
     ) {
       return { tipo: 'incierta', motivo: e.message };
     }
+    if (requiereRecuperacion(e)) {
+      return { tipo: 'incierta', motivo: `ARCA respondió 10016 por número: ${(e as Error).message}` };
+    }
+    if (e instanceof ArcaRechazoError) return rechazada(e);
     throw e;
   }
-  if (result.aprobada) return { tipo: 'aprobada', result };
-  if (requiereRecuperacion(result)) {
-    return { tipo: 'incierta', motivo: `ARCA respondió 10016 por número: ${mensajes(result.observaciones)}` };
-  }
-  return { tipo: 'rechazada', motivo: mensajes(result.observaciones), observaciones: result.observaciones };
 }
 
 /**
@@ -236,6 +240,8 @@ async function enviar(operacion: Operacion, opts: OptsEmision): Promise<Desenlac
  *   (mismo `cbteNro` y misma fecha). Es seguro: si el intento original llegara
  *   a autorizarse después, ARCA rechaza el duplicado (10016), nunca emite dos.
  * - `conflicto`: el número existe con otros datos → revisión manual.
+ * - `ArcaRechazoError`: el número existe con los datos del intento pero
+ *   rechazado → se trata como rechazo (no se emitió).
  * Si la consulta o el reenvío no dan certeza, el comprobante sigue pendiente.
  */
 async function resolverIncierto(emision: EmisionGuardada): Promise<{ desenlace: Desenlace; reenviado: boolean }> {
@@ -243,6 +249,8 @@ async function resolverIncierto(emision: EmisionGuardada): Promise<{ desenlace: 
   try {
     recuperacion = await arca.recuperarComprobante(emision.intento);
   } catch (e) {
+    // El número existe con los datos del intento pero ARCA lo informa rechazado.
+    if (e instanceof ArcaRechazoError) return { desenlace: rechazada(e), reenviado: false };
     return { desenlace: { tipo: 'incierta', motivo: `No se pudo consultar ARCA: ${(e as Error).message}` }, reenviado: false };
   }
 
@@ -251,7 +259,7 @@ async function resolverIncierto(emision: EmisionGuardada): Promise<{ desenlace: 
   }
 
   if (recuperacion.estado === 'conflicto') {
-    // FECompConsultarResult en camelCase (arca-facturacion 6); cbteFch y
+    // FECompConsultarResult en camelCase; cbteFch y
     // codAutorizacion son opcionales (ARCA puede omitirlos).
     const r = recuperacion.encontrado.resultGet;
     return {
@@ -407,7 +415,7 @@ class InvoiceService {
       }
 
       if (desenlace.tipo === 'rechazada') {
-        // `aprobada: false`: ARCA evaluó el comprobante y lo rechazó (no se emitió).
+        // ArcaRechazoError: ARCA evaluó el comprobante y lo rechazó (no se emitió).
         // Mismo status y forma que un ArcaWSFEError: 422 con `errors` y `details`.
         await prisma.invoice.delete({ where: { id: creada.id } });
         throw new AppError(

@@ -173,7 +173,7 @@ describe('GET /api/afip/status (WSFEv1 + WSFEX, sin WSAA)', () => {
   });
 });
 
-describe('WSFEv1 con login WSAA (camelCase de arca-facturacion 6)', () => {
+describe('WSFEv1 con login WSAA (camelCase)', () => {
   it('GET /comprobante devuelve resultGet en camelCase con listas como arrays y events', async () => {
     handlers.FECompConsultar = () =>
       asmx(
@@ -277,7 +277,7 @@ describe('WSFEv1 con login WSAA (camelCase de arca-facturacion 6)', () => {
   });
 });
 
-describe('POST /api/afip/constatar (arca-cdc 0.6, camelCase)', () => {
+describe('POST /api/afip/constatar (camelCase)', () => {
   const input = {
     cbteModo: 'CAE',
     cuitEmisor: '30712345671',
@@ -291,7 +291,7 @@ describe('POST /api/afip/constatar (arca-cdc 0.6, camelCase)', () => {
     docNroReceptor: '20123456786',
   };
 
-  it('envía el CmpReq y devuelve { resultado, fchProceso, cmpResp, observaciones, events }', async () => {
+  it('envía el CmpReq y devuelve { resultado, fchProceso, cmpResp, observaciones, eventos }', async () => {
     let enviado = '';
     handlers.ComprobanteConstatar = (req) => {
       enviado = req.body;
@@ -315,7 +315,7 @@ describe('POST /api/afip/constatar (arca-cdc 0.6, camelCase)', () => {
       resultado: 'A',
       fchProceso: '20261101120000',
       observaciones: [],
-      events: [],
+      eventos: [],
       cmpResp: { cbteNro: 150, codAutorizacion: '73429843294823' },
     });
   });
@@ -489,5 +489,36 @@ describe('Certificados: ambiente activo, CUIT y permisos', () => {
 
     liberar();
     expect((await primera).status).toBe(200);
+  });
+});
+
+describe('POST /api/afip/fecred-aceptar', () => {
+  const FECRED_NS = 'http://ar.gob.afip.wsfecred/FECredService/';
+  const fecred = (method: string, inner: string) =>
+    soapEnvelope(`<ns2:${method}Response xmlns:ns2="${FECRED_NS}">${inner}</ns2:${method}Response>`);
+  const input = { idCtaCte: { codCtaCte: 1 }, saldoAceptado: 10, codMoneda: 'PES', cotizacionMonedaUlt: 1 };
+
+  it('un rechazo de ARCA (resultado R) → 422 ARCA_RECHAZO con operacion, errors y observaciones', async () => {
+    // FECredService (JAX-WS): el elemento del request es `aceptarFECredRequest`.
+    handlers.aceptarFECredRequest = () =>
+      fecred(
+        'aceptarFECred',
+        '<operacionFECredReturn><resultado>R</resultado><idCtaCte><codCtaCte>1</codCtaCte></idCtaCte>' +
+          '<arrayObservaciones><codigoDescripcion><codigo>7</codigo><descripcion>Obs</descripcion></codigoDescripcion></arrayObservaciones>' +
+          '<arrayErrores><codigoDescripcion><codigo>2004</codigo><descripcion>Saldo no coincide</descripcion></codigoDescripcion></arrayErrores>' +
+          '</operacionFECredReturn>',
+      );
+
+    const { status, body } = await api('/fecred-aceptar', { method: 'POST', body: input });
+
+    expect(status).toBe(422);
+    expect(body).toEqual({
+      success: false,
+      code: 'ARCA_RECHAZO',
+      operacion: 'aceptarFECred',
+      error: 'ARCA rechazó la operación: 2004: Saldo no coincide',
+      errors: [{ code: 2004, msg: 'Saldo no coincide' }],
+      observaciones: [{ code: 7, msg: 'Obs' }],
+    });
   });
 });

@@ -434,11 +434,11 @@ export async function getMtxcaStatus() {
 
 /**
  * ComprobanteType con los nombres del XSD (condicionIVAReceptor obligatoria). Un rechazo
- * (resultado "R") responde 422. Con resultado A/O incluye `urlQR`.
+ * (resultado "R") responde 422 con `operacion`, `errors` y `observaciones`. Autorizado (A/O) incluye `urlQR`.
  */
 export async function autorizarMtxca(comprobante: Record<string, unknown>) {
   const { data } = await api.post('/afip/mtxca-autorizar', comprobante);
-  return unwrap<{ resultado: 'A' | 'O' | 'R'; comprobante?: Record<string, unknown>; errores?: unknown[]; urlQR?: string }>(data);
+  return unwrap<{ resultado: 'A' | 'O'; comprobante: Record<string, unknown>; observaciones: unknown[]; urlQR?: string }>(data);
 }
 
 // SIRE (solo existen emitir, anular y status)

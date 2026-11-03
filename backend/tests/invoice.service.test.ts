@@ -1,6 +1,7 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import {
   ArcaAuthError,
+  ArcaRechazoError,
   ArcaResultadoIncierto,
   ArcaWSFEError,
   armarComprobante,
@@ -113,7 +114,6 @@ const CAE = '73429843294823';
 
 function aprobada(intento: IntentoComprobante, extra: Partial<FacturaResult> = {}): FacturaResult {
   return {
-    aprobada: true,
     cae: CAE,
     caeVencimiento: '20261111',
     cbteNro: intento.cbteNro,
@@ -219,13 +219,13 @@ describe('invoice.service: emisión', () => {
     expect(request.condicionIvaReceptorId).toBe(5);
   });
 
-  it('un rechazo con observaciones (aprobada: false) no deja la factura guardada', async () => {
-    arcaMock.facturar.mockImplementation(async (opts: any) => ({
-      ...aprobada(intentoDe(opts.cbteNro)),
-      aprobada: false,
-      cae: undefined,
-      observaciones: [{ code: 10048, msg: 'Importe inválido' }],
-    }));
+  it('un rechazo (ArcaRechazoError) no deja la factura guardada', async () => {
+    arcaMock.facturar.mockRejectedValue(
+      new ArcaRechazoError('FECAESolicitar: ARCA rechazó el comprobante', {
+        operacion: 'FECAESolicitar',
+        observaciones: [{ code: 10048, msg: 'Importe inválido' }],
+      }),
+    );
 
     const error = await invoiceService.createInvoice(facturaB).catch((e) => e);
     expect(error).toBeInstanceOf(AppError);
@@ -356,12 +356,10 @@ describe('invoice.service: resultado incierto → recuperar', () => {
   });
 
   it('el 10016 por número (requiereRecuperacion) se trata como incierto', async () => {
-    arcaMock.facturar.mockImplementation(async (opts: any) => ({
-      ...aprobada(intentoDe(opts.cbteNro)),
-      aprobada: false,
-      cae: undefined,
-      observaciones: [{ code: 10016, msg: 'El numero o fecha del comprobante no se corresponde con el proximo a autorizar' }],
-    }));
+    const msg = 'El numero o fecha del comprobante no se corresponde con el proximo a autorizar';
+    arcaMock.facturar.mockRejectedValue(
+      new ArcaRechazoError(msg, { operacion: 'FECAESolicitar', observaciones: [{ code: 10016, msg }] }),
+    );
     arcaMock.recuperarComprobante.mockImplementation(async (intento: IntentoComprobante) => ({
       estado: 'autorizado',
       resultado: aprobada(intento),
@@ -371,6 +369,24 @@ describe('invoice.service: resultado incierto → recuperar', () => {
 
     expect(arcaMock.recuperarComprobante).toHaveBeenCalled();
     expect(invoice.resultado).toBe('A');
+  });
+
+  it('recuperarComprobante lo encuentra rechazado (ArcaRechazoError) → rechazo, no queda guardada', async () => {
+    arcaMock.facturar.mockRejectedValue(incierto(42));
+    arcaMock.recuperarComprobante.mockRejectedValue(
+      new ArcaRechazoError('FECompConsultar: ARCA rechazó el comprobante 6-1-42', {
+        operacion: 'FECompConsultar',
+        observaciones: [{ code: 10048, msg: 'Importe inválido' }],
+      }),
+    );
+
+    const error = await invoiceService.createInvoice(facturaB).catch((e) => e);
+
+    expect(error).toBeInstanceOf(AppError);
+    expect(error.statusCode).toBe(422);
+    expect(error.errors).toEqual([{ code: 10048, msg: 'Importe inválido' }]);
+    expect(arcaMock.facturar).toHaveBeenCalledTimes(1);
+    expect(db.invoices.size).toBe(0);
   });
 
   it('conflicto (el número existe con otros datos) → resultado C para revisión manual', async () => {
