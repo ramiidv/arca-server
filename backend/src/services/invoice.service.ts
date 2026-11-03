@@ -26,7 +26,7 @@ import { formatDate, roundHalfEven } from '@ramiidv/arca-common';
 import { prisma } from '../lib/prisma';
 import { arca } from './arca.service';
 import { config } from '../config';
-import { AppError, mensajesArca } from '../middleware/errorHandler';
+import { AppError, mensajesArca, motivosRechazo } from '../middleware/errorHandler';
 
 interface InvoiceItemInput {
   description: string;
@@ -115,7 +115,8 @@ type Desenlace =
 
 /** Rechazo de ARCA (`resultado` "R"): con certeza no se emitió. */
 function rechazada(e: ArcaRechazoError): Desenlace {
-  return { tipo: 'rechazada', motivo: mensajes(e.observaciones), observaciones: e.observaciones };
+  const motivos = motivosRechazo(e);
+  return { tipo: 'rechazada', motivo: mensajes(motivos), observaciones: motivos };
 }
 
 /** Redondeo a 2 decimales mitad al par, el mismo criterio que usan los SDKs (manual de WSFEv1). */
@@ -414,19 +415,6 @@ class InvoiceService {
         throw e;
       }
 
-      if (desenlace.tipo === 'rechazada') {
-        // ArcaRechazoError: ARCA evaluó el comprobante y lo rechazó (no se emitió).
-        // Mismo status y forma que un ArcaWSFEError: 422 con `errors` y `details`.
-        await prisma.invoice.delete({ where: { id: creada.id } });
-        throw new AppError(
-          422,
-          `ARCA rechazó el comprobante: ${desenlace.motivo}`,
-          true,
-          desenlace.observaciones,
-          desenlace.observaciones,
-        );
-      }
-
       if (desenlace.tipo === 'incierta') {
         console.warn(`[Facturación] Resultado incierto para la factura #${creada.id}: ${desenlace.motivo}`);
         await this.guardarEmision(creada.id, { ...emision, estado: 'incierto', ultimoMensaje: desenlace.motivo });
@@ -457,7 +445,7 @@ class InvoiceService {
       const invoice = await prisma.invoice.update({
         where: { id },
         data: {
-          cae: result.cae ?? null,
+          cae: result.cae,
           caeFchVto: result.caeVencimiento ?? null,
           resultado: RESULTADO.APROBADA,
           qrUrl,
@@ -479,12 +467,14 @@ class InvoiceService {
     }
 
     if (desenlace.tipo === 'rechazada') {
-      // Después de recuperar y reenviar, ARCA lo rechazó: con certeza no se emitió.
-      // Se borra para liberar el número (cbteTipo, puntoVenta, cbteNro).
+      // ARCA evaluó el comprobante y lo rechazó (en el envío, al recuperarlo o al
+      // reenviarlo): con certeza no se emitió. Se borra el registro para liberar el
+      // número (cbteTipo, puntoVenta, cbteNro). Mismo status y forma que un
+      // ArcaWSFEError: 422 con `errors` y `details`.
       await prisma.invoice.delete({ where: { id } });
       throw new AppError(
         422,
-        `ARCA rechazó el comprobante al reenviarlo: no se emitió y se eliminó el registro pendiente. ${desenlace.motivo}`,
+        `ARCA rechazó el comprobante: ${desenlace.motivo}`,
         true,
         desenlace.observaciones,
         desenlace.observaciones,

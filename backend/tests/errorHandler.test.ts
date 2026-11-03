@@ -39,7 +39,7 @@ import { ArcaPadronServiceError, ArcaPadronError } from '@ramiidv/arca-padron';
 import { ArcaAgroServiceError, ArcaAgroResponseError } from '@ramiidv/arca-agro';
 import { ArcaSerializationError } from '@ramiidv/arca-empleados';
 import { ArcaSireServiceError } from '@ramiidv/arca-sire';
-import { errorHandler, AppError } from '../src/middleware/errorHandler';
+import { errorHandler, AppError, motivosRechazo } from '../src/middleware/errorHandler';
 
 function run(err: Error) {
   let status = 0;
@@ -217,6 +217,20 @@ describe('errorHandler: errores de los SDKs de ARCA', () => {
       }),
     );
     expect(soloObs.body.error).toBe('ARCA rechazó la operación: 3: Saldo inválido');
+  });
+
+  it('motivosRechazo: los errores, o las observaciones si no vino ningún error', () => {
+    const errors = [{ code: 102, msg: 'Número no correlativo' }];
+    const observaciones = [{ code: 7, msg: 'aviso' }];
+    expect(motivosRechazo(new ArcaRechazoError('x', { operacion: 'op', errors, observaciones }))).toEqual(errors);
+    expect(motivosRechazo(new ArcaRechazoError('x', { operacion: 'op', observaciones }))).toEqual(observaciones);
+    expect(motivosRechazo(new ArcaRechazoError('x', { operacion: 'op' }))).toEqual([]);
+  });
+
+  it('ArcaRechazoError sin errores ni observaciones → 422 con el mensaje del SDK', () => {
+    const { status, body } = run(new ArcaRechazoError('WSMTXCA autorizarComprobante: rechazado', { operacion: 'autorizarComprobante' }));
+    expect(status).toBe(422);
+    expect(body.error).toBe('ARCA rechazó la operación: WSMTXCA autorizarComprobante: rechazado');
   });
 
   it('ArcaSireServiceError (subclase de ArcaRechazoError) → 422 con operacion', () => {

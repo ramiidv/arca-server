@@ -318,7 +318,7 @@ Sigue el flujo "Emisión segura" del README de arca-facturacion:
      - `autorizado` → aprobada con el CAE recuperado.
      - `no_emitido` → se reenvía **una vez** con las mismas opciones (mismo número y fecha). Es seguro
        según el README: si el intento original llegara a autorizarse, ARCA rechaza el duplicado (10016).
-       Si ARCA rechaza el reenvío (`ArcaWSFEError` salvo 6xx), con certeza no se emitió: se borra el
+       Si ARCA rechaza el reenvío (`ArcaRechazoError`, o `ArcaWSFEError` salvo 6xx), con certeza no se emitió: se borra el
        registro (libera el número) y responde 422. Si el reenvío falla sin evaluar el comprobante
        (`ArcaAuthError`, incluido el 600/601 que desde arca-facturacion 6.1 llega así, el 602, red), sigue `"P"`.
      - Rechazado (`recuperarComprobante` lanza `ArcaRechazoError`: el número existe con los datos del intento pero

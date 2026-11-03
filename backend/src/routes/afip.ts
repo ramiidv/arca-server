@@ -717,8 +717,8 @@ router.get('/sire-status', async (_req: Request, res: Response, next: NextFuncti
 // importeComprobante, cuitRetenido, ... Lo valida el SDK, incluidas las reglas de fechas del manual
 // (fechaRetencion >= 2019-12-01, fechaComprobante <= fechaRetencion; iguales en los tipos 3, 19 y 20).
 // Devuelve { certificadoNro, codigoSeguridad }. Un Fault de token/sign es ArcaAuthError (503); un
-// Fault Client, ArcaSireServiceError (un ArcaRechazoError: 422 con `operacion`). Ante un ArcaSoapError incierto no se reenvía: SIRE no
-// tiene consulta (verificar en el micrositio).
+// Fault Client, ArcaSireServiceError (un ArcaRechazoError: 422 con `operacion`). Ante un ArcaSoapError
+// incierto no se reenvía: SIRE no tiene consulta (verificar en el micrositio).
 const emitirCertificado = async (req: Request, res: Response, next: NextFunction) => {
   try {
     const body = bodyObjeto(req, res);

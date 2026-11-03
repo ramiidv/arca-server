@@ -12,6 +12,7 @@ import {
   testCert,
 } from '@ramiidv/arca-common/testing';
 import type { RecordedRequest } from '@ramiidv/arca-common/testing';
+import { FECRED_NAMESPACE } from '@ramiidv/arca-fecred';
 
 // ------------------------------------------------------------
 // End to end de las rutas /api/afip con los SDKs reales (arca.service real:
@@ -493,9 +494,8 @@ describe('Certificados: ambiente activo, CUIT y permisos', () => {
 });
 
 describe('POST /api/afip/fecred-aceptar', () => {
-  const FECRED_NS = 'http://ar.gob.afip.wsfecred/FECredService/';
   const fecred = (method: string, inner: string) =>
-    soapEnvelope(`<ns2:${method}Response xmlns:ns2="${FECRED_NS}">${inner}</ns2:${method}Response>`);
+    soapEnvelope(`<ns2:${method}Response xmlns:ns2="${FECRED_NAMESPACE}">${inner}</ns2:${method}Response>`);
   const input = { idCtaCte: { codCtaCte: 1 }, saldoAceptado: 10, codMoneda: 'PES', cotizacionMonedaUlt: 1 };
 
   it('un rechazo de ARCA (resultado R) → 422 ARCA_RECHAZO con operacion, errors y observaciones', async () => {

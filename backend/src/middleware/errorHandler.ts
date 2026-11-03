@@ -48,6 +48,11 @@ export function mensajesArca(errores: { code: number | string; msg: string }[] |
   return (errores ?? []).map((e) => `${e.code}: ${e.msg}`).join('; ');
 }
 
+/** Motivos de un rechazo de ARCA: los errores o, si no vino ninguno, las observaciones. */
+export function motivosRechazo(e: ArcaRechazoError): { code: number; msg: string }[] {
+  return e.errors.length > 0 ? e.errors : e.observaciones;
+}
+
 /** Código HTTP para un error de negocio de Padrón según su `reason`. */
 const PADRON_REASON_STATUS: Record<string, number> = {
   inexistente: 404,
@@ -302,12 +307,11 @@ export function errorHandler(
   // ARCA rechazó la operación (resultado "R") en una emisión de MTXCA, FECRED o
   // SIRE: no se emitió. Antes que ArcaServiceError (es una subclase).
   if (err instanceof ArcaRechazoError) {
-    const motivos = err.errors.length > 0 ? err.errors : err.observaciones;
     res.status(422).json({
       success: false,
       code: err.code,
       operacion: err.operacion,
-      error: `ARCA rechazó la operación: ${mensajesArca(motivos) || err.message}`,
+      error: `ARCA rechazó la operación: ${mensajesArca(motivosRechazo(err)) || err.message}`,
       errors: err.errors,
       observaciones: err.observaciones,
     });
