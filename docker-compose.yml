@@ -8,7 +8,9 @@ services:
       POSTGRES_PASSWORD: ${DB_PASSWORD:-arca_dev_2024}
       POSTGRES_DB: ${DB_NAME:-arca_facturacion}
     ports:
-      - "5433:5432"
+      # Solo desde la máquina host (desarrollo local: npm run db:up). Con la contraseña por
+      # defecto, publicarlo en todas las interfaces dejaría la base expuesta.
+      - "127.0.0.1:5433:5432"
     volumes:
       - pgdata:/var/lib/postgresql/data
     healthcheck:
@@ -25,24 +27,33 @@ services:
     restart: unless-stopped
     environment:
       DATABASE_URL: postgresql://${DB_USER:-arca}:${DB_PASSWORD:-arca_dev_2024}@postgres:5432/${DB_NAME:-arca_facturacion}
-      JWT_SECRET: ${JWT_SECRET:-change-me-in-production}
+      JWT_SECRET: ${JWT_SECRET:?Definí JWT_SECRET en .env (por ejemplo, openssl rand -hex 32)}
       JWT_EXPIRES_IN: ${JWT_EXPIRES_IN:-7d}
-      AFIP_CUIT: ${AFIP_CUIT:-20000000000}
-      AFIP_CERT_PATH: ${AFIP_CERT_PATH:-./certs/cert.crt}
-      AFIP_KEY_PATH: ${AFIP_KEY_PATH:-./certs/key.key}
+      AFIP_CUIT: ${AFIP_CUIT:?Definí AFIP_CUIT en .env (la CUIT que factura, 11 dígitos)}
+      # Volumen arca-certs (con escritura): ahí se guarda el certificado generado desde la UI.
+      AFIP_CERT_PATH: /app/certs/cert.crt
+      AFIP_KEY_PATH: /app/certs/key.key
       AFIP_PUNTO_VENTA: ${AFIP_PUNTO_VENTA:-1}
       AFIP_PRODUCTION: ${AFIP_PRODUCTION:-false}
-      AFIP_TICKETS_DIR: ${AFIP_TICKETS_DIR:-/app/tickets}
+      # Volumen arca-tickets
+      AFIP_TICKETS_DIR: /app/tickets
+      AFIP_RECOVERY_DELAY_MS: ${AFIP_RECOVERY_DELAY_MS:-3000}
       PORT: 3001
-      CORS_ORIGIN: ${CORS_ORIGIN:-*}
+      # La UI se sirve desde el mismo origen que la API (nginx): CORS solo hace falta para
+      # otros orígenes. Lista separada por comas.
+      CORS_ORIGIN: ${CORS_ORIGIN:-http://localhost}
+      # Detrás de nginx: 1 salto de proxy (el rate limit usa la IP real del cliente).
+      TRUST_PROXY: ${TRUST_PROXY:-1}
     ports:
-      - "3001:3001"
+      # Solo desde la máquina host (debug): desde afuera se entra por nginx.
+      - "127.0.0.1:3001:3001"
     depends_on:
       postgres:
         condition: service_healthy
     volumes:
-      - ./certs:/app/certs:ro
-      # Tickets de Acceso de WSAA: persisten entre reinicios (certs/ se monta solo lectura)
+      # Certificado y clave de ARCA (con escritura, para generarlos/renovarlos desde la UI)
+      - arca-certs:/app/certs
+      # Tickets de Acceso de WSAA: persisten entre reinicios
       - arca-tickets:/app/tickets
 
   frontend:
@@ -73,4 +84,5 @@ services:
 
 volumes:
   pgdata:
+  arca-certs:
   arca-tickets:

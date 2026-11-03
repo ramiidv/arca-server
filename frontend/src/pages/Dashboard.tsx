@@ -14,6 +14,7 @@ import type { ArcaStatus, Invoice, InvoiceStats } from '../types';
 import { formatCurrency, formatDate, formatCbteTipo, formatFullInvoiceNumber } from '../utils/formatters';
 import InvoiceStatusBadge from '../components/InvoiceStatusBadge';
 import { useAuth } from '../context/AuthContext';
+import { getApiErrorMessage } from '../utils/errors';
 
 export default function Dashboard() {
   const { user } = useAuth();
@@ -28,22 +29,23 @@ export default function Dashboard() {
       try {
         setLoading(true);
         const [statsData, invoicesData] = await Promise.all([
-          getInvoiceStats().catch(() => null),
-          getInvoices({ page: 1, limit: 10 }).catch(() => ({ invoices: [] })),
+          getInvoiceStats(),
+          getInvoices({ page: 1, limit: 10 }),
         ]);
 
-        if (statsData) setStats(statsData);
+        setStats(statsData);
         setRecentInvoices(invoicesData.invoices || []);
 
         try {
           const status = await getAfipStatus();
           setAfipStatus(status);
         } catch {
+          // El estado de ARCA es solo un indicador (sin certificado instalado siempre falla):
+          // se oculta. El detalle del error se ve en Configuración → Estado de ARCA.
           setAfipStatus(null);
         }
       } catch (err) {
-        setError('Error al cargar los datos del dashboard');
-        console.error(err);
+        setError(getApiErrorMessage(err, 'Error al cargar los datos del dashboard'));
       } finally {
         setLoading(false);
       }
@@ -82,7 +84,7 @@ export default function Dashboard() {
 
   return (
     <div className="space-y-6">
-      {/* Welcome + AFIP Status */}
+      {/* Welcome + ARCA Status */}
       <div className="flex flex-wrap items-center justify-between gap-4">
         <div>
           <h2 className="text-xl font-bold text-gray-900">
@@ -98,7 +100,7 @@ export default function Dashboard() {
             className="hidden sm:flex items-center gap-3 rounded-lg border border-gray-200/80 bg-white px-4 py-2 shadow-sm"
             title={afipStatus.wsfe.ok ? 'WSFEv1 operativo' : afipStatus.wsfe.error}
           >
-            <span className="text-xs font-medium text-gray-500">AFIP</span>
+            <span className="text-xs font-medium text-gray-500">ARCA</span>
             {(['appserver', 'dbserver', 'authserver'] as const).map((server) => (
               <span key={server} className="inline-flex items-center gap-1 text-[11px] text-gray-600">
                 {afipStatus.wsfe.status?.[server] === 'OK' ? (
@@ -139,6 +141,9 @@ export default function Dashboard() {
             <p className="mt-0.5 text-2xl font-bold tracking-tight text-gray-900">
               {stats?.totalInvoices ?? 0}
             </p>
+            <p className="text-[11px] text-gray-400">
+              + {stats?.creditNotes ?? 0} NC · {stats?.debitNotes ?? 0} ND
+            </p>
           </div>
         </div>
 
@@ -147,7 +152,9 @@ export default function Dashboard() {
             <CurrencyDollarIcon className="h-5 w-5 text-emerald-600" />
           </div>
           <div>
-            <p className="text-xs font-medium text-gray-500">Monto Total</p>
+            <p className="text-xs font-medium text-gray-500" title="Comprobantes autorizados; las notas de crédito restan">
+              Monto Total <span className="text-gray-400">(neto de NC)</span>
+            </p>
             <p className="mt-0.5 text-2xl font-bold tracking-tight text-gray-900">
               {formatCurrency(stats?.totalAmount ?? 0)}
             </p>
@@ -163,6 +170,9 @@ export default function Dashboard() {
             <p className="mt-0.5 text-2xl font-bold tracking-tight text-gray-900">
               {stats?.monthlyInvoices ?? 0}
             </p>
+            <p className="text-[11px] text-gray-400">
+              facturas · + {stats?.monthlyCreditNotes ?? 0} NC · {stats?.monthlyDebitNotes ?? 0} ND
+            </p>
           </div>
         </div>
 
@@ -171,7 +181,9 @@ export default function Dashboard() {
             <ArrowTrendingUpIcon className="h-5 w-5 text-violet-600" />
           </div>
           <div>
-            <p className="text-xs font-medium text-gray-500">Monto del Mes</p>
+            <p className="text-xs font-medium text-gray-500" title="Comprobantes autorizados del mes; las notas de crédito restan">
+              Monto del Mes <span className="text-gray-400">(neto de NC)</span>
+            </p>
             <p className="mt-0.5 text-2xl font-bold tracking-tight text-gray-900">
               {formatCurrency(stats?.monthlyAmount ?? 0)}
             </p>

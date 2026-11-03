@@ -40,6 +40,15 @@ vi.mock('../src/config', () => ({
   },
 }));
 
+// arca-cert: solo se simula la emisión del certificado (el portal de ARCA); getCertExpiry es el real.
+const createCertificate = vi.hoisted(() => vi.fn());
+const renewCertificate = vi.hoisted(() => vi.fn());
+vi.mock('arca-cert', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('arca-cert')>()),
+  createCertificate,
+  renewCertificate,
+}));
+
 const WSFE_NS = 'http://ar.gov.afip.dif.FEV1/';
 const WSFEX_NS = 'http://ar.gov.afip.dif.fexv1/';
 const WSCDC_NS = 'http://servicios1.afip.gob.ar/wscdc/';
@@ -84,6 +93,12 @@ beforeAll(async () => {
 
   const app = express();
   app.use(express.json());
+  // Sustituye a authMiddleware: el rol del usuario viene en un header del test.
+  app.use((req, _res, next) => {
+    const role = req.header('x-test-role');
+    if (role) req.user = { userId: 1, email: 'test@example.com', role };
+    next();
+  });
   app.use('/api/afip', afipRoutes);
   app.use(errorHandler);
   // Solo lo usa el test para hablar con el server: no pasa por el fetch simulado.
@@ -104,17 +119,22 @@ beforeEach(() => {
   vi.spyOn(console, 'error').mockImplementation(() => {});
   login = (service) => loginResponse(`token-${service}`, new Date(Date.now() + 12 * 3600_000));
   handlers = {};
+  createCertificate.mockReset();
+  renewCertificate.mockReset();
 });
 
 // El fetch global está simulado (es el de ARCA): al server del test se le habla con http.
-async function api(pathname: string, init?: { method?: string; body?: unknown }) {
+async function api(pathname: string, init?: { method?: string; body?: unknown; role?: string }) {
   const { request } = await import('http');
   return new Promise<{ status: number; body: any }>((resolve, reject) => {
     const url = new URL(`${baseUrl}${pathname}`);
     const data = init?.body === undefined ? undefined : JSON.stringify(init.body);
     const req = request(
       url,
-      { method: init?.method ?? 'GET', headers: { 'Content-Type': 'application/json' } },
+      {
+        method: init?.method ?? 'GET',
+        headers: { 'Content-Type': 'application/json', ...(init?.role && { 'X-Test-Role': init.role }) },
+      },
       (res) => {
         let raw = '';
         res.on('data', (c) => (raw += c));
@@ -384,5 +404,90 @@ describe('POST /api/afip/test-cert (WsaaClient del SDK)', () => {
 
   it('environment inválido → 400', async () => {
     expect((await api('/test-cert', { method: 'POST', body: { environment: 'prod' } })).status).toBe(400);
+  });
+
+  it('sin environment usa el ambiente activo del server (homologación en el test)', async () => {
+    const r = await api('/test-cert', { method: 'POST', body: {} });
+    expect(r.status).toBe(200);
+    expect(r.body.data.environment).toBe('testing');
+  });
+});
+
+describe('Certificados: ambiente activo, CUIT y permisos', () => {
+  it('GET /config expone el ambiente activo, la CUIT y el punto de venta', async () => {
+    const r = await api('/config');
+    expect(r.status).toBe(200);
+    expect(r.body.data).toEqual({ environment: 'testing', cuit: '20123456786', puntoVenta: 1 });
+  });
+
+  it('GET /cert-info lee AFIP_CERT_PATH (no backend/certs fijo)', async () => {
+    const r = await api('/cert-info');
+    expect(r.status).toBe(200);
+    expect(r.body.data).toMatchObject({ expired: false, daysLeft: expect.any(Number) });
+  });
+
+  const pedido = { cuit: '20123456786', password: 'x', alias: 'test' };
+
+  it('generate-cert y renew-cert requieren un admin (403)', async () => {
+    expect((await api('/generate-cert', { method: 'POST', body: pedido })).status).toBe(403);
+    expect((await api('/renew-cert', { method: 'POST', body: pedido, role: 'user' })).status).toBe(403);
+  });
+
+  it('rechaza un certificado de otro ambiente que el del server (400) sin llamar a ARCA', async () => {
+    const r = await api('/generate-cert', { method: 'POST', body: { ...pedido, environment: 'production' }, role: 'admin' });
+    expect(r.status).toBe(400);
+    expect(r.body.error).toMatch(/homologación.*AFIP_PRODUCTION/);
+    expect(createCertificate).not.toHaveBeenCalled();
+  });
+
+  it('rechaza una CUIT distinta de AFIP_CUIT (400) sin llamar a ARCA', async () => {
+    const r = await api('/renew-cert', { method: 'POST', body: { ...pedido, cuit: '20111111112' }, role: 'admin' });
+    expect(r.status).toBe(400);
+    expect(r.body.error).toMatch(/no coincide con AFIP_CUIT/);
+    expect(renewCertificate).not.toHaveBeenCalled();
+  });
+
+  it('faltan datos → 400', async () => {
+    expect((await api('/generate-cert', { method: 'POST', body: { cuit: '20123456786' }, role: 'admin' })).status).toBe(400);
+  });
+
+  it('con CUIT y ambiente del server, un admin genera el certificado: lo instala y recarga los SDKs', async () => {
+    const { cert, key } = testCert();
+    createCertificate.mockResolvedValueOnce({ cert, key, alias: 'test', cuit: '20123456786', environment: 'testing' });
+
+    const r = await api('/generate-cert', { method: 'POST', body: { ...pedido, cuit: '20-12345678-6' }, role: 'admin' });
+
+    expect(r.status).toBe(200);
+    expect(createCertificate).toHaveBeenCalledWith({ cuit: '20123456786', password: 'x', alias: 'test', environment: 'testing' });
+    // No expone rutas del server.
+    expect(r.body.data).toEqual({
+      alias: 'test',
+      cuit: '20123456786',
+      environment: 'testing',
+      message: 'Certificado generado y activado.',
+    });
+    expect(fs.readFileSync(path.join(dir, 'cert.crt'), 'utf8')).toBe(cert);
+    expect(fs.readFileSync(path.join(dir, 'key.key'), 'utf8')).toBe(key);
+    expect(fs.readdirSync(dir).filter((f) => f.endsWith('.tmp'))).toEqual([]);
+  });
+
+  it('una segunda generación mientras hay otra en curso → 409 (no se pisan cert y clave)', async () => {
+    const { cert, key } = testCert();
+    let liberar!: () => void;
+    createCertificate.mockImplementationOnce(
+      () =>
+        new Promise((resolve) => {
+          liberar = () => resolve({ cert, key, alias: 'a', cuit: '20123456786', environment: 'testing' });
+        }),
+    );
+
+    const primera = api('/generate-cert', { method: 'POST', body: pedido, role: 'admin' });
+    await vi.waitFor(() => expect(createCertificate).toHaveBeenCalledTimes(1));
+    const segunda = await api('/renew-cert', { method: 'POST', body: pedido, role: 'admin' });
+    expect(segunda.status).toBe(409);
+    expect(renewCertificate).not.toHaveBeenCalled();
+
+    liberar();
+    expect((await primera).status).toBe(200);
   });
 });

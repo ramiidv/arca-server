@@ -16,7 +16,7 @@ const pageTitles: Record<string, string> = {
   '/clientes': 'Clientes',
   '/clientes/nuevo': 'Nuevo Cliente',
   '/consulta': 'Consultar Comprobante',
-  '/parametros': 'Parámetros AFIP',
+  '/parametros': 'Parámetros ARCA',
   '/configuracion': 'Configuración',
   '/api-keys': 'API Keys',
 };

@@ -1,7 +1,9 @@
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
 import { Link, useNavigate, useLocation } from 'react-router-dom';
 import { useAuth } from '../context/AuthContext';
 import toast from 'react-hot-toast';
+import { getRegistrationStatus } from '../api/client';
+import { getApiErrorMessage } from '../utils/errors';
 import { DocumentTextIcon, EyeIcon, EyeSlashIcon } from '@heroicons/react/24/outline';
 
 export default function Login() {
@@ -15,22 +17,27 @@ export default function Login() {
 
   const from = (location.state as { from?: { pathname: string } })?.from?.pathname || '/';
 
+  // El registro público solo está abierto mientras no haya usuarios (primer admin).
+  const [registroAbierto, setRegistroAbierto] = useState(false);
+  useEffect(() => {
+    getRegistrationStatus()
+      .then((r) => setRegistroAbierto(r.open))
+      .catch((err) => toast.error(getApiErrorMessage(err, 'No se pudo consultar el estado del registro')));
+  }, []);
+
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!email || !password) {
-      toast.error('Completa todos los campos');
+      toast.error('Completá todos los campos');
       return;
     }
     setLoading(true);
     try {
       await login(email, password);
-      toast.success('Sesion iniciada');
+      toast.success('Sesión iniciada');
       navigate(from, { replace: true });
     } catch (err: unknown) {
-      const msg =
-        (err as { response?: { data?: { error?: string } } })?.response?.data?.error ||
-        'Error al iniciar sesion';
-      toast.error(msg);
+      toast.error(getApiErrorMessage(err, 'Error al iniciar sesión'));
     } finally {
       setLoading(false);
     }
@@ -45,7 +52,7 @@ export default function Login() {
             <DocumentTextIcon className="h-8 w-8 text-white" aria-hidden="true" />
           </div>
           <h1 className="mt-4 text-3xl font-bold text-white">ARCA</h1>
-          <p className="mt-1 text-sm text-indigo-300">Facturacion Electronica</p>
+          <p className="mt-1 text-sm text-indigo-300">Facturación Electrónica</p>
         </div>
 
         {/* Form */}
@@ -55,7 +62,7 @@ export default function Login() {
           noValidate
         >
           <h2 className="mb-6 text-center text-xl font-semibold text-gray-900">
-            Iniciar Sesion
+            Iniciar Sesión
           </h2>
 
           <div className="space-y-4">
@@ -121,15 +128,21 @@ export default function Login() {
             )}
           </button>
 
-          <p className="mt-4 text-center text-sm text-gray-500">
-            ¿No tenes cuenta?{' '}
-            <Link
-              to="/register"
-              className="font-medium text-indigo-600 hover:text-indigo-500 focus:outline-none focus:underline"
-            >
-              Registrate
-            </Link>
-          </p>
+          {registroAbierto ? (
+            <p className="mt-4 text-center text-sm text-gray-500">
+              Todavía no hay usuarios.{' '}
+              <Link
+                to="/register"
+                className="font-medium text-indigo-600 hover:text-indigo-500 focus:outline-none focus:underline"
+              >
+                Creá la cuenta de administrador
+              </Link>
+            </p>
+          ) : (
+            <p className="mt-4 text-center text-xs text-gray-400">
+              ¿No tenés cuenta? Pedile a un administrador que te la cree.
+            </p>
+          )}
         </form>
       </div>
     </div>

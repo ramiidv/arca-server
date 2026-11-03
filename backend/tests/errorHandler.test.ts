@@ -157,6 +157,7 @@ describe('errorHandler: errores de los SDKs de ARCA', () => {
     expect(status).toBe(422);
     expect(body.code).toBe('ARCA_WSFE_ERROR');
     expect(body.errors).toEqual([{ code: 10015, msg: 'DocNro invalido' }]);
+    expect(body.error).toBe('ARCA rechazó la solicitud: 10015: DocNro invalido');
   });
 
   it('ArcaAgroServiceError incierto (errores + resultado) → 502 con uncertain', () => {
@@ -260,6 +261,43 @@ describe('errorHandler: errores de la app', () => {
   it('error desconocido → 500 sin detalles', () => {
     const { status, body } = run(new Error('boom'));
     expect(status).toBe(500);
-    expect(body).toEqual({ success: false, error: 'Internal server error' });
+    expect(body).toEqual({ success: false, error: 'Error interno del servidor' });
+  });
+
+  it('AppError con errors de ARCA los incluye (rechazo con aprobada: false)', () => {
+    const obs = [{ code: 10048, msg: 'Importe inválido' }];
+    const { status, body } = run(new AppError(422, 'ARCA rechazó el comprobante: 10048: Importe inválido', true, obs, obs));
+    expect(status).toBe(422);
+    expect(body).toEqual({ success: false, error: 'ARCA rechazó el comprobante: 10048: Importe inválido', details: obs, errors: obs });
+  });
+
+  it('ZodError → 400 en español con cada campo en el mensaje y los issues en details', async () => {
+    const { z } = await import('zod');
+    const r = z.object({ docNro: z.string().min(1, 'docNro es obligatorio') }).safeParse({ docNro: '' });
+    const { status, body } = run(r.error as Error);
+    expect(status).toBe(400);
+    expect(body.error).toBe('Datos inválidos: docNro: docNro es obligatorio');
+    expect(body.details[0]).toMatchObject({ path: ['docNro'], message: 'docNro es obligatorio' });
+  });
+
+  it('Prisma P2034 (conflicto de transacción serializable) → 409 para reintentar', () => {
+    // El errorHandler reconoce los errores de Prisma por el nombre de la clase.
+    class PrismaClientKnownRequestError extends Error {
+      constructor(public code: string) {
+        super('Transaction failed due to a write conflict');
+      }
+    }
+    const { status, body } = run(new PrismaClientKnownRequestError('P2034'));
+    expect(status).toBe(409);
+    expect(body.error).toMatch(/Reintentá/);
+  });
+
+  it('body JSON mal formado → 400; demasiado grande → 413', () => {
+    const malFormado = Object.assign(new SyntaxError('Unexpected token'), { type: 'entity.parse.failed' });
+    expect(run(malFormado)).toEqual({ status: 400, body: { success: false, error: 'El body no es un JSON válido' } });
+
+    const grande = Object.assign(new Error('request entity too large'), { type: 'entity.too.large' });
+    expect(run(grande).status).toBe(413);
   });
 });
+

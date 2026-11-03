@@ -23,14 +23,28 @@ export class AppError extends Error {
   public readonly statusCode: number;
   public readonly isOperational: boolean;
   public readonly details?: unknown;
+  /** Errores u observaciones de ARCA (`[{ code, msg }]`), como en `ArcaWSFEError`. */
+  public readonly errors?: { code: number | string; msg: string }[];
 
-  constructor(statusCode: number, message: string, isOperational = true, details?: unknown) {
+  constructor(
+    statusCode: number,
+    message: string,
+    isOperational = true,
+    details?: unknown,
+    errors?: { code: number | string; msg: string }[],
+  ) {
     super(message);
     this.statusCode = statusCode;
     this.isOperational = isOperational;
     this.details = details;
+    this.errors = errors;
     Object.setPrototypeOf(this, AppError.prototype);
   }
+}
+
+/** `"10015: msg; 10016: msg"` a partir de los errores u observaciones de ARCA. */
+export function mensajesArca(errores: { code: number | string; msg: string }[] | undefined): string {
+  return (errores ?? []).map((e) => `${e.code}: ${e.msg}`).join('; ');
 }
 
 /** Código HTTP para un error de negocio de Padrón según su `reason`. */
@@ -105,6 +119,7 @@ export function errorHandler(
       success: false,
       error: err.message,
       ...(err.details !== undefined && { details: err.details }),
+      ...(err.errors !== undefined && { errors: err.errors }),
     });
     return;
   }
@@ -115,14 +130,21 @@ export function errorHandler(
     if (prismaErr.code === 'P2002') {
       res.status(409).json({
         success: false,
-        error: 'A record with the same unique fields already exists',
+        error: 'Ya existe un registro con los mismos datos únicos',
+      });
+      return;
+    }
+    if (prismaErr.code === 'P2034') {
+      res.status(409).json({
+        success: false,
+        error: 'Otra operación modificó los mismos datos al mismo tiempo. Reintentá.',
       });
       return;
     }
     if (prismaErr.code === 'P2025') {
       res.status(404).json({
         success: false,
-        error: 'Record not found',
+        error: 'Registro no encontrado',
       });
       return;
     }
@@ -246,7 +268,7 @@ export function errorHandler(
     res.status(422).json({
       success: false,
       code: err.code,
-      error: 'AFIP rejected the request',
+      error: `ARCA rechazó la solicitud: ${mensajesArca(err.errors) || err.message}`,
       details: err.errors,
       errors: err.errors,
     });
@@ -295,7 +317,7 @@ export function errorHandler(
     res.status(status).json({
       success: false,
       code: err.code,
-      error: fault ? `ARCA respondió con un error SOAP: ${fault.faultstring}` : 'AFIP service unavailable',
+      error: fault ? `ARCA respondió con un error SOAP: ${fault.faultstring}` : 'El servicio de ARCA no está disponible',
       details: err.message,
       uncertain: err.uncertain,
       ...(err.statusCode !== undefined && { upstreamStatus: err.statusCode }),
@@ -387,17 +409,32 @@ export function errorHandler(
   // Zod validation errors (zod 4: `issues`)
   if (err.constructor?.name === 'ZodError') {
     const zodErr = err as any;
+    const issues: { path?: (string | number)[]; message: string }[] = zodErr.issues ?? [];
+    const resumen = issues
+      .map((i) => (i.path && i.path.length > 0 ? `${i.path.join('.')}: ${i.message}` : i.message))
+      .join('; ');
     res.status(400).json({
       success: false,
-      error: 'Validation error',
-      details: zodErr.issues ?? zodErr.errors,
+      error: resumen ? `Datos inválidos: ${resumen}` : 'Datos inválidos',
+      details: issues,
     });
+    return;
+  }
+
+  // Body mal formado o demasiado grande (express.json / body-parser)
+  const bodyErrorType = (err as { type?: string }).type;
+  if (bodyErrorType === 'entity.parse.failed') {
+    res.status(400).json({ success: false, error: 'El body no es un JSON válido' });
+    return;
+  }
+  if (bodyErrorType === 'entity.too.large') {
+    res.status(413).json({ success: false, error: 'El body supera el tamaño máximo permitido' });
     return;
   }
 
   // Default server error
   res.status(500).json({
     success: false,
-    error: 'Internal server error',
+    error: 'Error interno del servidor',
   });
 }

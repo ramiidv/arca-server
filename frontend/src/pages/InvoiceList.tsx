@@ -1,13 +1,14 @@
 import { useEffect, useState } from 'react';
 import { Link, useSearchParams } from 'react-router-dom';
+import toast from 'react-hot-toast';
 import {
   FunnelIcon,
   PlusCircleIcon,
   ArrowDownTrayIcon,
   DocumentTextIcon,
 } from '@heroicons/react/24/outline';
-import { getInvoices } from '../api/client';
-import type { Invoice } from '../types';
+import { getClients, getInvoices } from '../api/client';
+import type { Client, Invoice } from '../types';
 import { CBTE_TIPOS } from '../types';
 import {
   formatCurrency,
@@ -15,8 +16,15 @@ import {
   formatCbteTipo,
   formatFullInvoiceNumber,
 } from '../utils/formatters';
+import { getApiErrorMessage } from '../utils/errors';
 import InvoiceStatusBadge from '../components/InvoiceStatusBadge';
 import RecuperarFacturaButton from '../components/RecuperarFacturaButton';
+
+/** Entero positivo de un parámetro de la URL (`?page=`, `?clientId=`), o null si no lo es. */
+function enteroPositivo(valor: string | null): number | null {
+  const n = Number(valor);
+  return valor && Number.isInteger(n) && n > 0 ? n : null;
+}
 
 export default function InvoiceList() {
   const [searchParams, setSearchParams] = useSearchParams();
@@ -25,16 +33,22 @@ export default function InvoiceList() {
   const [totalPages, setTotalPages] = useState(0);
   const [loading, setLoading] = useState(true);
 
-  const page = Number(searchParams.get('page')) || 1;
+  const page = enteroPositivo(searchParams.get('page')) ?? 1;
   const [filterTipo, setFilterTipo] = useState<string>('');
   const [filterDesde, setFilterDesde] = useState('');
   const [filterHasta, setFilterHasta] = useState('');
   const [filterResultado, setFilterResultado] = useState(searchParams.get('resultado') ?? '');
+  // Filtro por cliente (GET /invoices?clientId=). Se puede abrir con ?clientId= en la URL.
+  const [filterCliente, setFilterCliente] = useState(String(enteroPositivo(searchParams.get('clientId')) ?? ''));
+  const [clienteBusqueda, setClienteBusqueda] = useState('');
+  const [clientes, setClientes] = useState<Client[]>([]);
   // Se incrementa para recargar la lista después de una recuperación
   const [recarga, setRecarga] = useState(0);
-  const [showFilters, setShowFilters] = useState(false);
+  const [showFilters, setShowFilters] = useState(Boolean(filterCliente));
 
   useEffect(() => {
+    // Si cambian los filtros antes de que llegue la respuesta, se descarta (no pisa la nueva).
+    let vigente = true;
     async function loadInvoices() {
       try {
         setLoading(true);
@@ -43,19 +57,47 @@ export default function InvoiceList() {
         if (filterDesde) params.desde = filterDesde.replace(/-/g, '');
         if (filterHasta) params.hasta = filterHasta.replace(/-/g, '');
         if (filterResultado) params.resultado = filterResultado;
+        if (filterCliente) params.clientId = Number(filterCliente);
 
         const data = await getInvoices(params as Parameters<typeof getInvoices>[0]);
+        if (!vigente) return;
         setInvoices(data.invoices || []);
         setTotal(data.total || 0);
         setTotalPages(data.totalPages || 0);
-      } catch {
+      } catch (err) {
+        if (!vigente) return;
         setInvoices([]);
+        toast.error(getApiErrorMessage(err, 'Error al cargar los comprobantes'), { duration: 8000 });
       } finally {
-        setLoading(false);
+        if (vigente) setLoading(false);
       }
     }
     loadInvoices();
-  }, [page, filterTipo, filterDesde, filterHasta, filterResultado, recarga]);
+    return () => {
+      vigente = false;
+    };
+  }, [page, filterTipo, filterDesde, filterHasta, filterResultado, filterCliente, recarga]);
+
+  // Clientes para el filtro: hasta 100, buscando por nombre o documento en el backend.
+  useEffect(() => {
+    if (!showFilters && !filterCliente) return;
+    let vigente = true;
+    const t = setTimeout(() => {
+      getClients({ search: clienteBusqueda.trim() || undefined, limit: 100 })
+        .then((data) => vigente && setClientes(data.clients))
+        .catch((err) => {
+          if (!vigente) return;
+          setClientes([]);
+          toast.error(getApiErrorMessage(err, 'Error al cargar los clientes'), { duration: 8000 });
+        });
+    }, 300);
+    return () => {
+      vigente = false;
+      clearTimeout(t);
+    };
+  }, [showFilters, filterCliente, clienteBusqueda]);
+
+  const clienteSeleccionado = clientes.find((c) => String(c.id) === filterCliente);
 
   const pendientes = invoices.filter((inv) => inv.resultado === 'P' || inv.resultado === 'C').length;
 
@@ -76,7 +118,7 @@ export default function InvoiceList() {
             <FunnelIcon className="h-4 w-4" />
             <span className="hidden sm:inline">Filtros</span>
           </button>
-          <button disabled className="btn-secondary text-xs opacity-50 hidden sm:inline-flex" title="Proximamente">
+          <button disabled className="btn-secondary text-xs opacity-50 hidden sm:inline-flex" title="Próximamente">
             <ArrowDownTrayIcon className="h-4 w-4" />
             Exportar
           </button>
@@ -151,12 +193,49 @@ export default function InvoiceList() {
               />
             </div>
           </div>
+          <div className="mt-4 grid grid-cols-1 gap-4 sm:grid-cols-2">
+            <div>
+              <label className="label" htmlFor="filtro-cliente-busqueda">Buscar cliente</label>
+              <input
+                id="filtro-cliente-busqueda"
+                type="search"
+                value={clienteBusqueda}
+                onChange={(e) => setClienteBusqueda(e.target.value)}
+                placeholder="Nombre o documento..."
+                className="input"
+              />
+            </div>
+            <div>
+              <label className="label" htmlFor="filtro-cliente">Cliente</label>
+              <select
+                id="filtro-cliente"
+                value={filterCliente}
+                onChange={(e) => {
+                  setFilterCliente(e.target.value);
+                  setSearchParams({ page: '1' });
+                }}
+                className="select"
+              >
+                <option value="">Todos</option>
+                {filterCliente && !clienteSeleccionado && (
+                  <option value={filterCliente}>Cliente #{filterCliente}</option>
+                )}
+                {clientes.map((c) => (
+                  <option key={c.id} value={c.id}>
+                    {c.name} ({c.docNumber})
+                  </option>
+                ))}
+              </select>
+            </div>
+          </div>
           <button
             onClick={() => {
               setFilterTipo('');
               setFilterDesde('');
               setFilterHasta('');
               setFilterResultado('');
+              setFilterCliente('');
+              setClienteBusqueda('');
               setSearchParams({ page: '1' });
             }}
             className="mt-3 text-xs text-indigo-600 hover:underline"
@@ -194,7 +273,7 @@ export default function InvoiceList() {
               <thead>
                 <tr className="border-b border-gray-200">
                   <th className="table-header px-6 py-3">Tipo</th>
-                  <th className="table-header px-6 py-3">Numero</th>
+                  <th className="table-header px-6 py-3">Número</th>
                   <th className="table-header px-6 py-3">Fecha</th>
                   <th className="table-header px-6 py-3">Cliente</th>
                   <th className="table-header px-6 py-3">Total</th>

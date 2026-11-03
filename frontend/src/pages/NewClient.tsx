@@ -63,8 +63,8 @@ export default function NewClient() {
           email: client.email || '',
           phone: client.phone || '',
         });
-      } catch {
-        toast.error('Error al cargar el cliente');
+      } catch (err) {
+        toast.error(getApiErrorMessage(err, 'Error al cargar el cliente'));
         navigate('/clientes');
       } finally {
         setFetching(false);
@@ -113,7 +113,7 @@ export default function NewClient() {
       setCuitFound(true);
       toast.success(`Datos cargados: ${nombre}`);
     } catch (err) {
-      toast.error(getApiErrorMessage(err, 'No se encontró el CUIT en el padrón de AFIP'), { duration: 8000 });
+      toast.error(getApiErrorMessage(err, 'No se encontró el CUIT en el padrón de ARCA'), { duration: 8000 });
     } finally {
       setLookingUp(false);
     }
@@ -171,7 +171,7 @@ export default function NewClient() {
                   <option value={80}>CUIT</option>
                   <option value={86}>CUIL</option>
                   <option value={96}>DNI</option>
-                  <option value={99}>Consumidor Final</option>
+                  <option value={99}>Sin identificar / Consumidor Final</option>
                 </select>
               </div>
               <div>
@@ -191,7 +191,7 @@ export default function NewClient() {
                       onClick={lookupCuit}
                       disabled={lookingUp}
                       className="btn-secondary flex-shrink-0"
-                      title="Buscar en padrón AFIP"
+                      title="Buscar en padrón ARCA"
                     >
                       {lookingUp ? (
                         <div className="h-4 w-4 animate-spin rounded-full border-2 border-indigo-600 border-t-transparent" />
@@ -208,7 +208,7 @@ export default function NewClient() {
                 )}
                 {watchDocType === 80 && !isEditing && (
                   <p className="mt-1 text-[11px] text-gray-400">
-                    Ingresá el CUIT y hacé click en la lupa para completar los datos desde AFIP
+                    Ingresá el CUIT y hacé click en la lupa para completar los datos desde ARCA
                   </p>
                 )}
               </div>

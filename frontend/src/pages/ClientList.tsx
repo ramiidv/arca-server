@@ -9,6 +9,7 @@ import {
 } from '@heroicons/react/24/outline';
 import toast from 'react-hot-toast';
 import { getClients, deleteClient } from '../api/client';
+import { getApiErrorMessage } from '../utils/errors';
 import type { Client } from '../types';
 import { DOC_TIPOS, IVA_CONDITIONS } from '../types';
 
@@ -34,8 +35,9 @@ export default function ClientList() {
       setClients(data.clients || []);
       setTotal(data.total || 0);
       setTotalPages(data.totalPages || 0);
-    } catch {
+    } catch (err) {
       setClients([]);
+      toast.error(getApiErrorMessage(err, 'Error al cargar los clientes'), { duration: 8000 });
     } finally {
       setLoading(false);
     }
@@ -47,13 +49,13 @@ export default function ClientList() {
   }, [page, search]);
 
   const handleDelete = async (id: number, name: string) => {
-    if (!window.confirm(`Eliminar el cliente "${name}"?`)) return;
+    if (!window.confirm(`¿Eliminar el cliente "${name}"?`)) return;
     try {
       await deleteClient(id);
       toast.success('Cliente eliminado');
       loadClients();
-    } catch {
-      toast.error('Error al eliminar el cliente');
+    } catch (err) {
+      toast.error(getApiErrorMessage(err, 'Error al eliminar el cliente'), { duration: 8000 });
     }
   };
 
@@ -111,7 +113,7 @@ export default function ClientList() {
                 <tr className="border-b border-gray-200">
                   <th className="table-header px-6 py-3">Nombre</th>
                   <th className="table-header px-6 py-3">Tipo Doc.</th>
-                  <th className="table-header px-6 py-3">Numero Doc.</th>
+                  <th className="table-header px-6 py-3">Número Doc.</th>
                   <th className="table-header px-6 py-3">Cond. IVA</th>
                   <th className="table-header px-6 py-3">Facturas</th>
                   <th className="table-header px-6 py-3">Acciones</th>
@@ -163,7 +165,7 @@ export default function ClientList() {
       {totalPages > 1 && (
         <div className="flex items-center justify-between">
           <p className="text-sm text-gray-500">
-            Pagina {page} de {totalPages}
+            Página {page} de {totalPages}
           </p>
           <div className="flex gap-2">
             <button

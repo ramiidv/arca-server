@@ -11,8 +11,12 @@ import {
 import { createInvoice, getClients, getPuntosVenta } from '../api/client';
 import {
   CBTE_TIPOS,
+  CLASE_CBTE,
+  CONDICIONES_IVA_POR_CLASE,
+  DOC_TIPOS,
   IVA_ALICUOTAS,
   IVA_CONDITIONS,
+  TIPOS_FACTURA,
   type Client,
   type PuntoVenta,
 } from '../types';
@@ -43,20 +47,19 @@ interface InvoiceFormData {
 }
 
 // Solo facturas en NewInvoice — NC/ND se crean desde otro flujo
-const FACTURA_TIPOS: Record<number, string> = {
-  1: 'Factura A',
-  6: 'Factura B',
-  11: 'Factura C',
-};
+const FACTURA_TIPOS: Record<number, string> = Object.fromEntries(TIPOS_FACTURA.map((t) => [t, CBTE_TIPOS[t]]));
 
-// Tipo A requiere CUIT del receptor
-const TIPOS_A = new Set([1]);
-// Tipo C no discrimina IVA
-const TIPOS_C = new Set([11]);
-
-function isTipoA(tipo: number) { return TIPOS_A.has(tipo); }
-function isTipoC(tipo: number) { return TIPOS_C.has(tipo); }
 function needsServiceDates(concepto: number) { return concepto === 2 || concepto === 3; }
+
+/**
+ * Ayuda de cada tipo: las condiciones de IVA del receptor que acepta el SDK
+ * para la clase (CONDICIONES_IVA_POR_CLASE), no una regla normativa completa.
+ */
+const AYUDA_TIPO: Record<number, string> = {
+  1: 'Receptor RI o monotributista, con CUIT',
+  6: 'Receptor consumidor final, exento, no alcanzado o del exterior; no discrimina IVA',
+  11: 'Cualquier condición de IVA del receptor; no discrimina IVA',
+};
 
 export default function NewInvoice() {
   const navigate = useNavigate();
@@ -94,9 +97,13 @@ export default function NewInvoice() {
   const watchDocTipo = Number(watch('docTipo'));
   // Receptor identificado sin cliente cargado: hay que indicar la condición de IVA
   const pideCondicionIva = watchDocTipo !== 99 && !selectedClient;
+  // Condiciones que acepta la clase del comprobante (mismas reglas que arca-facturacion)
+  const clase = CLASE_CBTE[watchCbteTipo];
+  const condicionesValidas = CONDICIONES_IVA_POR_CLASE[clase];
 
-  const esA = isTipoA(watchCbteTipo);
-  const esC = isTipoC(watchCbteTipo);
+  // Tipo A requiere CUIT del receptor; tipo C no discrimina IVA
+  const esA = clase === 'A';
+  const esC = clase === 'C';
   const esServicio = needsServiceDates(watchConcepto);
 
   // Cuando cambia el tipo, ajustar defaults
@@ -114,18 +121,26 @@ export default function NewInvoice() {
     }
   }, [watchCbteTipo, esA, esC, setValue, selectedClient, watch]);
 
+  // Si cambia el tipo y la condición elegida no vale para la nueva clase, se limpia
+  const condicionElegida = watch('condicionIva');
+  useEffect(() => {
+    if (condicionElegida && !condicionesValidas.includes(Number(condicionElegida))) {
+      setValue('condicionIva', '');
+    }
+  }, [condicionElegida, condicionesValidas, setValue]);
+
   // Load clients and puntos de venta
   useEffect(() => {
     getClients({ limit: 100 })
       .then((data) => setClients(data.clients || []))
-      .catch(() => {});
+      .catch((err) => toast.error(getApiErrorMessage(err, 'Error al cargar los clientes'), { duration: 8000 }));
     getPuntosVenta()
       .then((data) => {
         const activos = (Array.isArray(data) ? data : []).filter((p) => p.bloqueado !== 'S'); // bloqueado es opcional en el SDK
         setPuntosVenta(activos);
         if (activos.length > 0) setValue('puntoVenta', activos[0].nro);
       })
-      .catch(() => {});
+      .catch((err) => toast.error(getApiErrorMessage(err, 'Error al cargar los puntos de venta de ARCA'), { duration: 8000 }));
   }, [setValue]);
 
   const filteredClients = clients.filter(
@@ -158,7 +173,6 @@ export default function NewInvoice() {
   const calculateTotals = () => {
     let impNeto = 0;
     let impIVA = 0;
-    let impTotConc = 0;
 
     (watchItems || []).forEach((item) => {
       const subtotal = (item.quantity || 0) * (item.unitPrice || 0);
@@ -167,21 +181,17 @@ export default function NewInvoice() {
         // Tipo C: todo va a neto, sin IVA
         impNeto += subtotal;
       } else {
+        // Todas las alícuotas del selector son gravadas, incluida 0% (id 3): suman a
+        // Neto Gravado, como en el SDK y en el detalle de la factura.
         const ivaInfo = IVA_ALICUOTAS[item.ivaId];
         const rate = ivaInfo?.rate ?? 21;
-        const ivaAmount = subtotal * rate / 100;
-
-        if (rate > 0) {
-          impNeto += subtotal;
-          impIVA += ivaAmount;
-        } else {
-          impTotConc += subtotal;
-        }
+        impNeto += subtotal;
+        impIVA += subtotal * rate / 100;
       }
     });
 
-    const impTotal = impNeto + impIVA + impTotConc;
-    return { impNeto, impIVA, impTotConc, impOpEx: 0, impTotal };
+    const impTotal = impNeto + impIVA;
+    return { impNeto, impIVA, impTotal };
   };
 
   const totals = calculateTotals();
@@ -194,6 +204,10 @@ export default function NewInvoice() {
     }
     if (pideCondicionIva && !data.condicionIva) {
       toast.error('Indicá la condición de IVA del receptor');
+      return;
+    }
+    if (pideCondicionIva && !condicionesValidas.includes(Number(data.condicionIva))) {
+      toast.error(`La condición de IVA elegida no es válida para ${FACTURA_TIPOS[watchCbteTipo] ?? 'este comprobante'}`);
       return;
     }
 
@@ -272,7 +286,7 @@ export default function NewInvoice() {
           </div>
           <h2 className="mt-5 text-xl font-bold text-gray-900">Factura Emitida</h2>
           <p className="mt-1 text-sm text-gray-500">
-            {CBTE_TIPOS[success.cbteTipo] || FACTURA_TIPOS[success.cbteTipo]}
+            {CBTE_TIPOS[success.cbteTipo]}
           </p>
           <p className="mt-1 font-mono text-lg font-bold text-indigo-600">
             {String(success.puntoVenta).padStart(5, '0')}-
@@ -317,11 +331,7 @@ export default function NewInvoice() {
         <div className="grid grid-cols-1 gap-3 sm:grid-cols-3">
           {Object.entries(FACTURA_TIPOS).map(([value, label]) => {
             const selected = watchCbteTipo === Number(value);
-            const hint = Number(value) === 1
-              ? 'RI a RI — Requiere CUIT'
-              : Number(value) === 6
-                ? 'RI a CF / Mono / Exento'
-                : 'Monotributista a cualquiera';
+            const hint = AYUDA_TIPO[Number(value)];
             return (
               <label
                 key={value}
@@ -352,7 +362,8 @@ export default function NewInvoice() {
         {esA && (
           <div className="mt-3 flex items-start gap-2 rounded-lg bg-amber-50 px-3 py-2 text-xs text-amber-700">
             <InformationCircleIcon className="mt-0.5 h-4 w-4 flex-shrink-0" />
-            Factura A requiere CUIT del receptor (Responsable Inscripto a Responsable Inscripto)
+            Factura A requiere receptor con CUIT y condición de IVA Responsable Inscripto o Monotributo
+            (incluye Monotributo Social y Trabajador Independiente Promovido)
           </div>
         )}
 
@@ -457,13 +468,12 @@ export default function NewInvoice() {
                 disabled={esA && !selectedClient}
               >
                 {esA ? (
-                  <option value={80}>CUIT</option>
+                  <option value={80}>{DOC_TIPOS[80]}</option>
                 ) : (
                   <>
-                    <option value={80}>CUIT</option>
-                    <option value={86}>CUIL</option>
-                    <option value={96}>DNI</option>
-                    <option value={99}>Consumidor Final</option>
+                    {Object.entries(DOC_TIPOS).map(([value, label]) => (
+                      <option key={value} value={value}>{label}</option>
+                    ))}
                   </>
                 )}
               </select>
@@ -493,14 +503,13 @@ export default function NewInvoice() {
                 </label>
                 <select {...register('condicionIva')} className="select">
                   <option value="">Seleccioná...</option>
-                  {Object.entries(IVA_CONDITIONS)
-                    .filter(([value]) => value !== '5')
-                    .map(([value, label]) => (
-                      <option key={value} value={value}>{label}</option>
-                    ))}
+                  {condicionesValidas.map((value) => (
+                    <option key={value} value={value}>{IVA_CONDITIONS[value]}</option>
+                  ))}
                 </select>
                 <p className="mt-1 text-[11px] text-gray-400">
-                  Obligatoria para receptores identificados (RG 5616)
+                  Obligatoria para receptores identificados (RG 5616). Se muestran las que acepta{' '}
+                  {FACTURA_TIPOS[watchCbteTipo] ?? 'el comprobante'}.
                 </p>
               </div>
             )}
@@ -664,13 +673,18 @@ export default function NewInvoice() {
 
       {/* Observations */}
       <div className="card">
-        <label className="label">Observaciones</label>
+        <label className="label" htmlFor="observations">Observaciones</label>
         <textarea
+          id="observations"
           {...register('observations')}
           className="input"
           rows={3}
           placeholder="Observaciones opcionales..."
+          aria-describedby="observations-ayuda"
         />
+        <p id="observations-ayuda" className="mt-1 text-[11px] text-gray-400">
+          Notas internas: se guardan solo en este sistema y no se envían a ARCA ni aparecen en el comprobante autorizado.
+        </p>
       </div>
 
       {/* Totals Summary */}
@@ -687,12 +701,6 @@ export default function NewInvoice() {
                 <span className="text-gray-600">IVA</span>
                 <span className="font-medium">{formatCurrency(totals.impIVA)}</span>
               </div>
-              {totals.impTotConc > 0 && (
-                <div className="flex items-center justify-between text-sm">
-                  <span className="text-gray-600">No Gravado</span>
-                  <span className="font-medium">{formatCurrency(totals.impTotConc)}</span>
-                </div>
-              )}
             </>
           )}
           <div className="border-t border-gray-200 pt-2">

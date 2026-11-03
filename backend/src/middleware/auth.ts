@@ -27,7 +27,7 @@ export function authMiddleware(req: Request, res: Response, next: NextFunction):
       .findUnique({ where: { key: keyHash }, include: { user: true } })
       .then((record) => {
         if (!record) {
-          res.status(401).json({ success: false, error: 'Invalid API key' });
+          res.status(401).json({ success: false, error: 'API key inválida' });
           return;
         }
         req.user = { userId: record.user.id, email: record.user.email, role: record.user.role };
@@ -35,7 +35,7 @@ export function authMiddleware(req: Request, res: Response, next: NextFunction):
         next();
       })
       .catch(() => {
-        res.status(500).json({ success: false, error: 'Authentication error' });
+        res.status(500).json({ success: false, error: 'Error de autenticación' });
       });
     return;
   }
@@ -43,7 +43,7 @@ export function authMiddleware(req: Request, res: Response, next: NextFunction):
   // Check for Bearer token
   const authHeader = req.header('Authorization');
   if (!authHeader?.startsWith('Bearer ')) {
-    res.status(401).json({ success: false, error: 'Access denied. No token provided.' });
+    res.status(401).json({ success: false, error: 'Acceso denegado: falta el token (Authorization: Bearer <jwt>) o la API key (X-API-Key).' });
     return;
   }
 
@@ -53,13 +53,18 @@ export function authMiddleware(req: Request, res: Response, next: NextFunction):
     req.user = decoded;
     next();
   } catch {
-    res.status(401).json({ success: false, error: 'Invalid or expired token' });
+    res.status(401).json({ success: false, error: 'Token inválido o vencido' });
   }
 }
 
+/**
+ * Solo administradores (el primer usuario registrado, o los que cree un admin
+ * con rol admin). Se usa después de `authMiddleware`. Con API key, el rol es el
+ * del usuario dueño de la key.
+ */
 export function adminMiddleware(req: Request, res: Response, next: NextFunction): void {
   if (req.user?.role !== 'admin') {
-    res.status(403).json({ success: false, error: 'Admin access required' });
+    res.status(403).json({ success: false, error: 'Esta operación requiere un usuario administrador' });
     return;
   }
   next();

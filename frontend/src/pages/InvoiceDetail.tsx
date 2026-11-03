@@ -7,6 +7,7 @@ import {
   ReceiptRefundIcon,
 } from '@heroicons/react/24/outline';
 import { getInvoice } from '../api/client';
+import { getApiErrorMessage } from '../utils/errors';
 import type { Invoice } from '../types';
 import { IVA_ALICUOTAS } from '../types';
 import {
@@ -33,8 +34,8 @@ export default function InvoiceDetail() {
         setLoading(true);
         const data = await getInvoice(Number(id));
         setInvoice(data);
-      } catch {
-        setError('Error al cargar la factura');
+      } catch (err) {
+        setError(getApiErrorMessage(err, 'Error al cargar la factura'));
       } finally {
         setLoading(false);
       }
@@ -143,7 +144,7 @@ export default function InvoiceDetail() {
             </p>
           </div>
           <div className="text-right">
-            <p className="text-sm text-gray-500">Fecha de Emision</p>
+            <p className="text-sm text-gray-500">Fecha de Emisión</p>
             <p className="text-lg font-semibold">{formatDate(invoice.cbteFch)}</p>
             <div className="mt-2">
               <InvoiceStatusBadge resultado={invoice.resultado} />
@@ -159,7 +160,7 @@ export default function InvoiceDetail() {
         </h3>
         <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
           <div>
-            <p className="text-sm text-gray-500">Nombre / Razon Social</p>
+            <p className="text-sm text-gray-500">Nombre / Razón Social</p>
             <p className="font-medium">{invoice.client?.name || '-'}</p>
           </div>
           <div>
@@ -187,7 +188,7 @@ export default function InvoiceDetail() {
       {(invoice.fchServDesde || invoice.fchServHasta) && (
         <div className="card">
           <h3 className="mb-3 text-sm font-semibold uppercase tracking-wider text-gray-500">
-            Periodo de Servicio
+            Período de Servicio
           </h3>
           <div className="grid grid-cols-1 gap-4 sm:grid-cols-3">
             <div>
@@ -216,7 +217,7 @@ export default function InvoiceDetail() {
         <table className="w-full">
           <thead>
             <tr className="border-y border-gray-200">
-              <th className="table-header px-6 py-3">Descripcion</th>
+              <th className="table-header px-6 py-3">Descripción</th>
               <th className="table-header px-6 py-3 text-right">Cantidad</th>
               <th className="table-header px-6 py-3 text-right">Precio Unit.</th>
               <th className="table-header px-6 py-3 text-right">IVA</th>
@@ -315,7 +316,7 @@ export default function InvoiceDetail() {
                 className="inline-flex items-center gap-2 rounded-lg bg-emerald-100 px-3 py-2 text-sm font-medium text-emerald-800 transition-colors hover:bg-emerald-200"
               >
                 <QrCodeIcon className="h-4 w-4" />
-                Ver QR en AFIP
+                Ver QR en ARCA
               </a>
             </div>
           )}
@@ -329,6 +330,7 @@ export default function InvoiceDetail() {
             Observaciones
           </h3>
           <p className="text-sm text-gray-700">{invoice.observations}</p>
+          <p className="mt-2 text-[11px] text-gray-400">Nota interna: no se envió a ARCA.</p>
         </div>
       )}
     </div>

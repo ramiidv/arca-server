@@ -41,6 +41,17 @@ function onEvent(event: ArcaEvent) {
   }
 }
 
+export type AmbienteArca = 'production' | 'testing';
+
+/** Ambiente activo de los SDKs (AFIP_PRODUCTION). Fijo hasta reiniciar el server. */
+export function ambienteArca(): AmbienteArca {
+  return config.afip.production ? 'production' : 'testing';
+}
+
+export function nombreAmbiente(ambiente: AmbienteArca): string {
+  return ambiente === 'production' ? 'producción' : 'homologación';
+}
+
 function readCerts() {
   if (!fs.existsSync(config.afip.certPath) || !fs.existsSync(config.afip.keyPath)) {
     throw new AppError(503, 'No hay certificado de ARCA instalado: generalo desde Configuración (POST /api/afip/generate-cert).');
@@ -73,8 +84,8 @@ function credencialesDe(production?: boolean) {
   };
 }
 
-function createAll(production?: boolean) {
-  const credenciales = credencialesDe(production);
+function createAll() {
+  const credenciales = credencialesDe();
   // Un solo WsaaClient para los 7 SDKs (mismo certificado): comparte los
   // tickets en memoria, el reloj de ARCA y las esperas tras un login fallido.
   // Valida el certificado y la clave al construirse (ArcaValidationError).
@@ -106,10 +117,9 @@ type Sdk = Exclude<keyof Instances, 'wsaa'>;
 // certificado y la clave, y el server tiene que poder arrancar sin ellos (por
 // ejemplo, para generar el certificado desde /api/afip/generate-cert).
 let _instances: Instances | null = null;
-let _production: boolean | undefined;
 
 function instances(): Instances {
-  if (!_instances) _instances = createAll(_production);
+  if (!_instances) _instances = createAll();
   return _instances;
 }
 
@@ -138,11 +148,16 @@ export async function probarCertificado(production: boolean) {
   return wsaa.getAccessTicket('wsfe');
 }
 
-export function reloadArca(production?: boolean) {
-  _instances = createAll(production);
-  _production = production;
-  const env = (production ?? config.afip.production) ? 'PRODUCCIÓN' : 'HOMOLOGACIÓN';
-  console.log(`[ARCA] Servicios recargados con los certificados nuevos (${env})`);
+/**
+ * Recrea los SDKs con el certificado recién instalado. Siempre con la CUIT y el
+ * ambiente del server (AFIP_CUIT, AFIP_PRODUCTION): /generate-cert y /renew-cert
+ * rechazan un certificado de otra CUIT u otro ambiente, así que no hace falta
+ * cambiarlos en caliente (y lo que se viera hasta reiniciar no coincidiría con
+ * la configuración).
+ */
+export function reloadArca() {
+  _instances = createAll();
+  console.log(`[ARCA] Servicios recargados con el certificado nuevo (${nombreAmbiente(ambienteArca())})`);
 }
 
 function proxy<K extends Sdk>(name: K): Instances[K] {
