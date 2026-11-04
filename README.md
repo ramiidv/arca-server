@@ -16,7 +16,7 @@ Sistema de facturación electrónica integrado con ARCA (ex AFIP, Argentina). Ba
 - **SIRE:** [@ramiidv/arca-sire](https://www.npmjs.com/package/@ramiidv/arca-sire) ^0.7 — Certificados de retención de IVA (C2005)
 - **Agro:** [@ramiidv/arca-agro](https://www.npmjs.com/package/@ramiidv/arca-agro) ^0.8 — WSCPE (con derivados granarios) y WSLPG (liquidación primaria y secundaria). El server expone la autorización de la CPE automotor y de la liquidación primaria. WSCTG fue derogado
 - **Empleados:** [@ramiidv/arca-empleados](https://www.npmjs.com/package/@ramiidv/arca-empleados) ^0.6 — Ingreso masivo de relaciones laborales (TXT de ancho fijo, 130 posiciones)
-- **Common:** [@ramiidv/arca-common](https://www.npmjs.com/package/@ramiidv/arca-common) ^0.9 — WSAA (un `WsaaClient` compartido por todos los SDKs), `FileTicketStorage`, SOAP con fallback TLS legacy, validadores
+- **Common:** [@ramiidv/arca-common](https://www.npmjs.com/package/@ramiidv/arca-common) ^0.10 — WSAA (un `WsaaClient` compartido por todos los SDKs), `FileTicketStorage`, SOAP con fallback TLS legacy, validadores
 - **Certificados:** [arca-cert](https://www.npmjs.com/package/arca-cert) — Generación automática de certificados de ARCA
 - **Infra:** Docker Compose, Nginx
 
@@ -70,7 +70,7 @@ Sistema de facturación electrónica integrado con ARCA (ex AFIP, Argentina). Ba
 
 ### Observabilidad
 
-- Logging de eventos de todos los SDKs (`onEvent`): auth login/cache-hit/clock-skew/storage-error, request end/retry/error
+- Logging de eventos de todos los SDKs (`onEvent`): auth login/cache-hit/clock-skew/storage-error, request end/retry/error/legacy-tls
 - Un solo `WsaaClient` (`createWsaaClient` de arca-common) compartido por los 7 SDKs: mismos tickets, reloj y esperas de login
 - Tickets de Acceso de WSAA persistidos en disco (`FileTicketStorage`): un reinicio no deja al server sin acceso (`ArcaTicketVigenteError`)
 - Tras un error permanente de WSAA (certificado vencido o no confiable, `coe.notAuthorized`...) el servicio queda
@@ -148,7 +148,7 @@ Variables del backend:
 | `AFIP_PRODUCTION` | No | `false` | `false` = homologación, `true` = producción. El certificado tiene que ser de este ambiente |
 | `AFIP_CERT_PATH` / `AFIP_KEY_PATH` | No | `backend/certs/cert.crt` / `backend/certs/key.key` | Certificado y clave: los leen los SDKs y los escribe "Generar certificado". Rutas relativas al directorio desde el que corre el server |
 | `AFIP_PUNTO_VENTA` | No | `1` | Punto de venta por defecto |
-| `AFIP_TICKETS_DIR` | No | `backend/certs/tickets` | Tickets de Acceso de WSAA (token/sign: tratalo como un secreto; el directorio se crea con permisos 0700) |
+| `AFIP_TICKETS_DIR` | No | `backend/certs/tickets` | Tickets de Acceso de WSAA (token/sign: tratalo como un secreto). El directorio tiene que ser del usuario que corre el server: se crea con permisos 0700 y, si ya existe con otros, se ajusta a 0700; si es un symlink o de otro usuario, se rechaza y los tickets quedan solo en memoria |
 | `AFIP_RECOVERY_DELAY_MS` | No | `3000` | Espera antes de consultar una factura con resultado incierto |
 
 > Producción de WSFEv1 en Node >= 17 funciona gracias al fallback TLS legacy de arca-common (`legacyTls: "auto"`, default).
@@ -397,6 +397,11 @@ Migración: `20261101120000_add_invoice_emision` agrega `Invoice.emision` (JSONB
 | POST | `/api/afip/agro-cpe-autorizar` | Autorizar Carta de Porte automotor (request según el XSD de WSCPE). El error 550 (PDF) vuelve en `advertencias` |
 | POST | `/api/afip/agro-lpg-autorizar` | Autorizar liquidación de granos (`{ liquidacion, deducciones?, retenciones?, percepciones? }`). El error 1021 (PDF) vuelve en `advertencias` |
 | POST | `/api/afip/empleados-generar` | Archivo de relaciones laborales (`{ registros: [{ tipo: alta\|baja\|modificacion\|novedad, data }], strict?, fechaReferencia? }`). `fechaInicio` obligatoria en todos los movimientos; propiedades desconocidas → 400. Con `?formato=txt` descarga el TXT (ISO-8859-1) |
+
+**Cambios de comportamiento (release de seguridad de los SDKs: arca-common 0.10, arca-facturacion 7.0.2):** el
+server no cambia su API. Los SDKs no siguen redirects (un 3xx responde 502), limitan las respuestas a 50 MB, usan el
+TLS legacy solo para la producción de WSFEv1/WSFEX/WSCDC (se loguea como `TLS legacy`), piden el TRA a WSAA con 10
+minutos de vigencia (el ticket sigue durando 12 horas) y verifican el directorio de tickets (ver `AFIP_TICKETS_DIR`).
 
 **Cambios de comportamiento (arca-facturacion 7.0.1, arca-common 0.9.1 y parches de cdc, mtxca, sire y agro):**
 `/puntos-venta` sin puntos de venta responde 200 con `[]` (antes 422 con el error 602 de ARCA); `/mtxca-autorizar`

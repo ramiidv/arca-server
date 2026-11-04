@@ -38,6 +38,10 @@ function onEvent(event: ArcaEvent) {
     case 'request:error':
       console.error(`[ARCA] Error en ${event.method}: ${errorText(event.error)}`);
       break;
+    case 'request:legacy-tls':
+      // Producción de WSFEv1/WSFEX/WSCDC negocia DH de 1024 bits: el SDK reintenta con TLS legacy.
+      console.log(`[ARCA] ${event.method}: TLS legacy (DH de 1024 bits) para ${event.endpoint}`);
+      break;
   }
 }
 
@@ -95,7 +99,8 @@ function createAll() {
   // Config común: todas las configs de los SDKs extienden ArcaSdkConfig de
   // arca-common (cuit number|string validado con dígito verificador,
   // ticketStorage, onEvent, `wsaa` compartido del mismo entorno y legacyTls
-  // "auto" por defecto para la producción de WSFEv1/WSCDC). Con `wsaa`, los
+  // "auto" por defecto, que el SDK limita al host de producción de WSFEv1/WSFEX/WSCDC).
+  // Con `wsaa`, los
   // SDKs ignoran cert/key/ticketStorage: se pasan igual porque son obligatorios.
   const base: ArcaSdkConfig = { ...credenciales, wsaa };
 
